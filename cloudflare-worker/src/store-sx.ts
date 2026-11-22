@@ -446,6 +446,22 @@ export class SxOperations {
 
   // MARK: - Expenses & Refunds CRUD
 
+  private async listPendingCreatedProjects(): Promise<Array<{ name: string; cashFlowSides: string }>> {
+    const pending = await this.ctx.listPendingEnvelopes("sx");
+    const created: Array<{ name: string; cashFlowSides: string }> = [];
+    for (const env of pending) {
+      if (env.op !== "create_project") continue;
+      const name = typeof env.payload.name === "string" ? env.payload.name.trim() : "";
+      if (!name) continue;
+      const cashFlowSides =
+        typeof env.payload.cashFlowSides === "string" && env.payload.cashFlowSides.trim()
+          ? env.payload.cashFlowSides.trim()
+          : "expenseOnly";
+      created.push({ name, cashFlowSides });
+    }
+    return created;
+  }
+
   private validateRecordPayload(
     input: {
       amount: number;
@@ -456,7 +472,8 @@ export class SxOperations {
       date?: string;
     },
     mode: "expense" | "income",
-    catalogJson: string | null
+    catalogJson: string | null,
+    pendingProjects: Array<{ name: string; cashFlowSides: string }> = []
   ): Record<string, unknown> {
     if (!Number.isFinite(input.amount) || input.amount <= 0) {
       throw new Error("SX amount must be a finite number greater than 0.");
@@ -466,12 +483,8 @@ export class SxOperations {
     const normalizedCurrency = normalizeCurrencyCode(input.currency, catalog);
 
     let normalizedProject = rawProject;
-    if (catalog?.projects?.length) {
-      const match = catalog.projects.find((proj) => proj.name.trim().toLowerCase() === rawProject.toLowerCase());
-      if (!match) {
-        const names = catalog.projects.map((proj) => proj.name).join(", ");
-        throw new Error(`Unknown projectName '${rawProject}'. Known projects: ${names}`);
-      }
+    const match = catalog?.projects?.find((proj) => proj.name.trim().toLowerCase() === rawProject.toLowerCase());
+    if (match) {
       if (mode === "expense" && match.supportsExpense === false) {
         throw new Error(`Project '${match.name}' does not support expense records.`);
       }
@@ -479,6 +492,25 @@ export class SxOperations {
         throw new Error(`Project '${match.name}' does not support income records.`);
       }
       normalizedProject = match.name;
+    } else {
+      const pendingMatch = pendingProjects.find((proj) => proj.name.toLowerCase() === rawProject.toLowerCase());
+      if (pendingMatch) {
+        const supportsExpense = pendingMatch.cashFlowSides === "expenseOnly" || pendingMatch.cashFlowSides === "both";
+        const supportsIncome = pendingMatch.cashFlowSides === "incomeOnly" || pendingMatch.cashFlowSides === "both";
+        if (mode === "expense" && !supportsExpense) {
+          throw new Error(`Project '${pendingMatch.name}' does not support expense records.`);
+        }
+        if (mode === "income" && !supportsIncome) {
+          throw new Error(`Project '${pendingMatch.name}' does not support income records.`);
+        }
+        normalizedProject = pendingMatch.name;
+      } else if (catalog?.projects?.length) {
+        const names = [
+          ...catalog.projects.map((proj) => proj.name),
+          ...pendingProjects.map((proj) => proj.name)
+        ].join(", ");
+        throw new Error(`Unknown projectName '${rawProject}'. Known projects: ${names}`);
+      }
     }
 
     const isoDate = validateIsoTimestamp(input.date, "date");
@@ -507,7 +539,8 @@ export class SxOperations {
     client?: string;
   }): Promise<Record<string, unknown>> {
     const state = await this.ctx.assertActionAllowed("sx", "create", "expenses");
-    const payload = this.validateRecordPayload(input, "expense", state.catalog_json);
+    const pendingProjects = await this.listPendingCreatedProjects();
+    const payload = this.validateRecordPayload(input, "expense", state.catalog_json, pendingProjects);
     if (input.credentialId !== undefined) {
       await this.ctx.assertActionDomainAllowed?.("sx", "credentials");
       payload.credentialId = validateId(input.credentialId, "credentialId");
@@ -646,7 +679,8 @@ export class SxOperations {
     client?: string;
   }): Promise<Record<string, unknown>> {
     const state = await this.ctx.assertActionAllowed("sx", "create", "incomes");
-    const payload = this.validateRecordPayload(input, "income", state.catalog_json);
+    const pendingProjects = await this.listPendingCreatedProjects();
+    const payload = this.validateRecordPayload(input, "income", state.catalog_json, pendingProjects);
     if (input.credentialId !== undefined) {
       await this.ctx.assertActionDomainAllowed?.("sx", "credentials");
       payload.credentialId = validateId(input.credentialId, "credentialId");
@@ -993,14 +1027,38 @@ export class SxOperations {
     for (const env of pending) {
       if (env.op === "create_credential") {
         const linkedProjId = typeof env.payload.projectId === "number" ? env.payload.projectId : null;
+        const linkedProjName =
+          typeof env.payload.projectName === "string" && env.payload.projectName.trim()
+            ? env.payload.projectName.trim()
+            : null;
+        const hasLink = linkedProjId !== null || linkedProjName !== null;
+        const links = hasLink
+          ? [
+              {
+                projectId: linkedProjId ?? -1,
+                projectName: linkedProjName ?? "",
+                startDate: typeof env.payload.startDate === "string" ? env.payload.startDate : env.createdAt,
+                hasStartDate: Boolean(
+                  env.payload.hasStartDate ??
+                    (env.payload.startDate !== undefined || env.payload.isAutoRenew === true)
+                ),
+                endDate: typeof env.payload.endDate === "string" ? env.payload.endDate : null,
+                isAutoRenew: Boolean(env.payload.isAutoRenew),
+                nextRenewalDate:
+                  typeof env.payload.nextRenewalDate === "string" ? env.payload.nextRenewalDate : null,
+                renewalHour: typeof env.payload.renewalHour === "number" ? env.payload.renewalHour : 0,
+                renewalWeekdays: typeof env.payload.renewalWeekdays === "number" ? env.payload.renewalWeekdays : 127
+              }
+            ]
+          : [];
         items.unshift({
           id: -1,
           username: String(env.payload.username ?? ""),
           type: String(env.payload.type ?? ""),
           website: String(env.payload.website ?? ""),
           issuer: String(env.payload.issuer ?? ""),
-          linkCount: linkedProjId ? 1 : 0,
-          links: [],
+          linkCount: hasLink ? 1 : 0,
+          links,
           pendingStatus: "queued_create",
           pendingRequestId: env.requestId
         });
@@ -1091,6 +1149,7 @@ export class SxOperations {
     type?: string;
     issuer?: string;
     projectId?: number;
+    projectName?: string;
     isAutoRenew?: boolean;
     startDate?: string;
     hasStartDate?: boolean;
@@ -1101,14 +1160,38 @@ export class SxOperations {
     requestId?: string;
     client?: string;
   }): Promise<Record<string, unknown>> {
-    await this.ctx.assertActionAllowed("sx", "create", "credentials");
+    const state = await this.ctx.assertActionAllowed("sx", "create", "credentials");
     const username = requireNonEmptyString(input.username, "username");
+    const rawProjectName = input.projectName?.trim();
+    if (input.projectId !== undefined && rawProjectName) {
+      throw new Error("Provide either 'projectId' or 'projectName', not both.");
+    }
     const payload: Record<string, unknown> = { username };
     if (input.website !== undefined) payload.website = input.website.trim();
     if (input.type !== undefined) payload.type = input.type.trim();
     if (input.issuer !== undefined) payload.issuer = input.issuer.trim();
     if (input.projectId !== undefined) {
       payload.projectId = validateId(input.projectId, "projectId");
+    } else if (rawProjectName) {
+      const catalog = safeJsonParse<SxCatalog>(state.catalog_json);
+      const pendingProjects = await this.listPendingCreatedProjects();
+      const catalogMatch = catalog?.projects?.find(
+        (proj) => proj.name.trim().toLowerCase() === rawProjectName.toLowerCase()
+      );
+      const pendingMatch = pendingProjects.find((proj) => proj.name.toLowerCase() === rawProjectName.toLowerCase());
+      if (catalogMatch) {
+        payload.projectName = catalogMatch.name;
+      } else if (pendingMatch) {
+        payload.projectName = pendingMatch.name;
+      } else if (catalog?.projects?.length) {
+        const names = [
+          ...catalog.projects.map((proj) => proj.name),
+          ...pendingProjects.map((proj) => proj.name)
+        ].join(", ");
+        throw new Error(`Unknown projectName '${rawProjectName}'. Known projects: ${names}`);
+      } else {
+        payload.projectName = rawProjectName;
+      }
     }
     Object.assign(payload, this.buildCredentialLinkSchedulePayload(input));
     const requestId = input.requestId?.trim() || generateRequestId("sx-cred");

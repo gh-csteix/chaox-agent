@@ -155,7 +155,7 @@ export class D1ExchangeStore {
 
   async listPendingEnvelopes(app: AgentAppID): Promise<InboxEnvelope[]> {
     const { results } = await this.db
-      .prepare("SELECT * FROM inbox WHERE app = ? ORDER BY created_at ASC, request_id ASC")
+      .prepare("SELECT * FROM inbox WHERE app = ? ORDER BY created_at ASC, rowid ASC")
       .bind(app)
       .all<InboxRow>();
     return results.map(mapInboxRow);

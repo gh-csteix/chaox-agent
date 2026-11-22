@@ -916,3 +916,177 @@ test("filters SX YYYY-MM-DD queries by device timeZoneIdentifier and localDate a
     [695, 699, 700]
   );
 });
+
+test("queues same-batch SX create_project, create_tag, create_credential(projectName), and record_expense in insertion order", async () => {
+  const env = makeEnv();
+  const snapRes = await callJson(env, "/sync/sx/snapshot", {
+    method: "PUT",
+    body: {
+      bundleId: "ai.chaox.sx",
+      appVersion: "0.1.1",
+      permission: "readWrite",
+      policy: {
+        allowRead: true,
+        allowCreate: true,
+        allowUpdate: true,
+        allowDelete: true,
+        allowedDomains: ["projects", "expenses", "incomes", "tags", "slogans", "credentials"],
+        consentAcknowledged: true
+      },
+      capabilities: ["catalog", "summary", "projects", "expenses", "tags", "credentials", "crud"],
+      catalog: {
+        timeZoneIdentifier: "Asia/Shanghai",
+        summaryCurrency: "CNY",
+        supportedCurrencies: ["CNY", "USD"],
+        projects: [{ id: "1", name: "Existing", currency: "CNY", supportsExpense: true, supportsIncome: true }],
+        tags: ["ExistingTag"]
+      },
+      datasets: {
+        projects: [],
+        expenses: [],
+        incomes: [],
+        tags: [],
+        slogans: [],
+        credentials: []
+      }
+    }
+  });
+  assert.equal(snapRes.status, 200);
+
+  const createProj = await callJson(env, "/mcp", {
+    method: "POST",
+    body: {
+      jsonrpc: "2.0",
+      id: 60,
+      method: "tools/call",
+      params: {
+        name: "sx_create_project",
+        arguments: {
+          name: "NewDomain",
+          currency: "USD",
+          projectType: "nonRenewal",
+          cycle: "irregular",
+          cashFlowSides: "expenseOnly",
+          requestId: "zzz-step-1-project"
+        }
+      }
+    }
+  });
+  assert.notEqual((createProj.data.result as { isError?: boolean }).isError, true);
+
+  const createTag = await callJson(env, "/mcp", {
+    method: "POST",
+    body: {
+      jsonrpc: "2.0",
+      id: 61,
+      method: "tools/call",
+      params: {
+        name: "sx_create_tag",
+        arguments: {
+          name: "Registrar",
+          requestId: "mmm-step-2-tag"
+        }
+      }
+    }
+  });
+  assert.notEqual((createTag.data.result as { isError?: boolean }).isError, true);
+
+  const createCred = await callJson(env, "/mcp", {
+    method: "POST",
+    body: {
+      jsonrpc: "2.0",
+      id: 62,
+      method: "tools/call",
+      params: {
+        name: "sx_create_credential",
+        arguments: {
+          username: "dns@newdomain.test",
+          website: "newdomain.example",
+          type: "Login",
+          issuer: "NewDomain",
+          projectName: "newdomain",
+          startDate: "2026-11-21T00:00:00Z",
+          requestId: "kkk-step-3-cred"
+        }
+      }
+    }
+  });
+  assert.notEqual((createCred.data.result as { isError?: boolean }).isError, true);
+
+  const recordExp = await callJson(env, "/mcp", {
+    method: "POST",
+    body: {
+      jsonrpc: "2.0",
+      id: 63,
+      method: "tools/call",
+      params: {
+        name: "sx_record_expense",
+        arguments: {
+          projectName: "newdomain",
+          amount: 10.98,
+          currency: "USD",
+          tags: ["Registrar"],
+          date: "2026-11-20T16:00:00Z",
+          requestId: "aaa-step-4-expense"
+        }
+      }
+    }
+  });
+  assert.notEqual((recordExp.data.result as { isError?: boolean }).isError, true);
+
+  // Enforcing queued project's cashFlowSides must reject income against an expenseOnly queued project.
+  const badIncome = await callJson(env, "/mcp", {
+    method: "POST",
+    body: {
+      jsonrpc: "2.0",
+      id: 64,
+      method: "tools/call",
+      params: {
+        name: "sx_record_income",
+        arguments: {
+          projectName: "NewDomain",
+          amount: 5,
+          currency: "USD",
+          requestId: "bbb-invalid-income"
+        }
+      }
+    }
+  });
+  assert.equal((badIncome.data.result as { isError?: boolean }).isError, true);
+
+  // Pin identical created_at across all 4 rows so ORDER BY created_at ASC, rowid ASC proves insertion order.
+  env.DB.prepare("UPDATE inbox SET created_at = '2026-11-22T06:00:00.000Z' WHERE app = 'sx'").run();
+
+  const inboxRes = await callJson(env, "/sync/sx/inbox");
+  assert.equal(inboxRes.status, 200);
+  const envelopes = inboxRes.data.envelopes as Array<{ op: string; requestId: string; payload: Record<string, unknown> }>;
+  assert.deepEqual(
+    envelopes.map((e) => e.op),
+    ["create_project", "create_tag", "create_credential", "record_expense"]
+  );
+  assert.equal(envelopes[2].payload.projectName, "NewDomain");
+  assert.equal(envelopes[3].payload.projectName, "NewDomain");
+
+  const credsRes = await callJson(env, "/mcp", {
+    method: "POST",
+    body: {
+      jsonrpc: "2.0",
+      id: 65,
+      method: "tools/call",
+      params: { name: "sx_list_credentials", arguments: {} }
+    }
+  });
+  const credsData = JSON.parse(((credsRes.data.result as { content: Array<{ text: string }> }).content[0]).text) as {
+    items: Array<{
+      username: string;
+      linkCount: number;
+      links: Array<{ projectName: string; hasStartDate: boolean }>;
+    }>
+  };
+  assert.equal(credsData.items.length, 1);
+  assert.equal(credsData.items[0].username, "dns@newdomain.test");
+  assert.equal(credsData.items[0].linkCount, 1);
+  assert.equal(credsData.items[0].links.length, 1);
+  assert.equal(credsData.items[0].links[0].projectName, "NewDomain");
+  assert.equal(credsData.items[0].links[0].hasStartDate, true);
+});

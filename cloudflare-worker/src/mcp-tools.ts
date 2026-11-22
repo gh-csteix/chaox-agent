@@ -570,6 +570,10 @@ export const TOOL_DEFINITIONS = [
         type: { type: "string" },
         issuer: { type: "string" },
         projectId: { type: "integer", minimum: 1 },
+        projectName: {
+          type: "string",
+          description: "Optional project name to link (works even when the project was just queued in the same sync batch)"
+        },
         isAutoRenew: { type: "boolean" },
         startDate: { type: "string" },
         hasStartDate: { type: "boolean" },

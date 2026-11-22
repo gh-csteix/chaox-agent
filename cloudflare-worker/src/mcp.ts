@@ -343,6 +343,7 @@ async function dispatchTool(
         type: optStr(args, "type"),
         issuer: optStr(args, "issuer"),
         projectId: optNum(args, "projectId"),
+        projectName: optStr(args, "projectName"),
         isAutoRenew: optBool(args, "isAutoRenew"),
         startDate: optStr(args, "startDate"),
         hasStartDate: optBool(args, "hasStartDate"),
