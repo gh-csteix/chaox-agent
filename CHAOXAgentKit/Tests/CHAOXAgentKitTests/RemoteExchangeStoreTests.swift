@@ -251,8 +251,8 @@ struct RemoteExchangeStoreTests {
         #expect(await store.savedMCPToken() == nil)
     }
 
-    @Test("testRemoteConnection verifies optional mcpToken against /mcp ping and saveRemoteConfiguration preserves or replaces it")
-    func testAndPersistOptionalMCPToken() async throws {
+    @Test("testRemoteConnection verifies required mcpToken against /mcp ping and saveRemoteConfiguration enforces, preserves, or replaces it")
+    func testAndPersistRequiredMCPToken() async throws {
         let store = AgentExchangeStore(
             app: .sx,
             defaultsSuiteName: "RemoteTests.\(UUID().uuidString)",
@@ -290,13 +290,64 @@ struct RemoteExchangeStoreTests {
             return (404, Data(#"{}"#.utf8))
         }
 
+        // Missing MCP token fails when requireMCPToken is true.
+        do {
+            try await store.testRemoteConnection(
+                urlString: "https://agent.example.com",
+                token: "sync-token-123",
+                mcpToken: "",
+                reuseSavedToken: false,
+                requireMCPToken: true
+            )
+            Issue.record("Expected missingMCPToken from testRemoteConnection")
+        } catch let error as AgentExchangeError {
+            guard case .missingMCPToken = error else {
+                Issue.record("Unexpected AgentExchangeError: \(error)")
+                return
+            }
+        }
+
+        do {
+            try await store.saveRemoteConfiguration(
+                urlString: "https://agent.example.com",
+                token: "sync-token-123",
+                mcpToken: "",
+                reuseSavedToken: false,
+                requireMCPToken: true
+            )
+            Issue.record("Expected missingMCPToken from saveRemoteConfiguration")
+        } catch let error as AgentExchangeError {
+            guard case .missingMCPToken = error else {
+                Issue.record("Unexpected AgentExchangeError: \(error)")
+                return
+            }
+        }
+
+        // reuseSavedToken still requires MCP token when none is saved yet.
+        do {
+            try await store.testRemoteConnection(
+                urlString: "https://agent.example.com",
+                token: "sync-token-123",
+                mcpToken: "",
+                reuseSavedToken: true,
+                requireMCPToken: true
+            )
+            Issue.record("Expected missingMCPToken when reusing without saved MCP token")
+        } catch let error as AgentExchangeError {
+            guard case .missingMCPToken = error else {
+                Issue.record("Unexpected AgentExchangeError: \(error)")
+                return
+            }
+        }
+
         // Swapped/invalid MCP token fails fast with clear error.
         await #expect(throws: AgentExchangeError.self) {
             try await store.testRemoteConnection(
                 urlString: "https://agent.example.com",
                 token: "sync-token-123",
                 mcpToken: "sync-token-123",
-                reuseSavedToken: false
+                reuseSavedToken: false,
+                requireMCPToken: true
             )
         }
 
@@ -304,25 +355,37 @@ struct RemoteExchangeStoreTests {
             urlString: "https://agent.example.com",
             token: "sync-token-123",
             mcpToken: "mcp-good-token",
-            reuseSavedToken: false
+            reuseSavedToken: false,
+            requireMCPToken: true
         )
         #expect(capture.mcpPingAuths.last == "Bearer mcp-good-token")
 
         try await store.saveRemoteConfiguration(
             urlString: "https://agent.example.com",
             token: "sync-token-123",
-            mcpToken: "mcp-good-token"
+            mcpToken: "mcp-good-token",
+            requireMCPToken: true
         )
         #expect(await store.hasSavedMCPToken())
         #expect(await store.savedMCPToken() == "mcp-good-token")
         #expect(await store.cachedStatus().hasSavedMCPToken)
 
-        // Blank mcpToken during reuseSavedToken preserves existing MCP token.
+        // Blank inputs during reuseSavedToken verify and preserve existing saved keys.
+        try await store.testRemoteConnection(
+            urlString: "https://agent.example.com",
+            token: "",
+            mcpToken: "",
+            reuseSavedToken: true,
+            requireMCPToken: true
+        )
+        #expect(capture.mcpPingAuths.last == "Bearer mcp-good-token")
+
         try await store.saveRemoteConfiguration(
             urlString: "https://agent.example.com",
             token: "",
             mcpToken: "",
-            reuseSavedToken: true
+            reuseSavedToken: true,
+            requireMCPToken: true
         )
         #expect(await store.savedMCPToken() == "mcp-good-token")
 

@@ -181,10 +181,16 @@ public actor AgentExchangeStore {
         urlString: String,
         token: String,
         mcpToken: String? = nil,
-        reuseSavedToken: Bool = false
+        reuseSavedToken: Bool = false,
+        requireMCPToken: Bool = false
     ) async throws {
         let baseURL = try Self.normalizedRemoteURL(urlString)
         let effectiveToken = try self.resolveToken(token, reuseSavedToken: reuseSavedToken).value
+        let effectiveMCPToken = try self.resolveMCPToken(
+            mcpToken,
+            reuseSavedToken: reuseSavedToken,
+            required: requireMCPToken
+        )?.value
 
         let healthData = try await self.performRemoteRequest(
             baseURL: baseURL,
@@ -210,16 +216,14 @@ public actor AgentExchangeStore {
         )
         _ = try AgentJSONCoding.decoder.decode(AgentRemoteStatusResponse.self, from: statusData)
 
-        if let trimmedMCP = mcpToken?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !trimmedMCP.isEmpty
-        {
+        if let effectiveMCPToken {
             let pingBody = Data(#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#.utf8)
             do {
                 _ = try await self.performRemoteRequest(
                     baseURL: baseURL,
                     path: "mcp",
                     method: "POST",
-                    token: trimmedMCP,
+                    token: effectiveMCPToken,
                     body: pingBody
                 )
             } catch let AgentExchangeError.remoteRequestFailed(statusCode, _) {
@@ -236,18 +240,24 @@ public actor AgentExchangeStore {
         token: String,
         mcpToken: String? = nil,
         reuseSavedToken: Bool = false,
+        requireMCPToken: Bool = false,
         defaultPermission: AgentPermissionTier = .appendOnly,
         policy: AgentPermissionPolicy? = nil
     ) throws {
         let baseURL = try Self.normalizedRemoteURL(urlString)
         let resolvedToken = try self.resolveToken(token, reuseSavedToken: reuseSavedToken)
+        let resolvedMCP = try self.resolveMCPToken(
+            mcpToken,
+            reuseSavedToken: reuseSavedToken,
+            required: requireMCPToken
+        )
         if resolvedToken.shouldSave {
             try self.tokenStorage.saveToken(resolvedToken.value, account: self.remoteTokenAccount)
         }
-        if let trimmedMCP = mcpToken?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !trimmedMCP.isEmpty
-        {
-            try self.tokenStorage.saveToken(trimmedMCP, account: self.remoteMCPTokenAccount)
+        if let resolvedMCP {
+            if resolvedMCP.shouldSave {
+                try self.tokenStorage.saveToken(resolvedMCP.value, account: self.remoteMCPTokenAccount)
+            }
         } else if !reuseSavedToken {
             self.tokenStorage.deleteToken(account: self.remoteMCPTokenAccount)
         }
@@ -441,6 +451,27 @@ public actor AgentExchangeStore {
             return (saved, false)
         }
         throw AgentExchangeError.missingRemoteToken
+    }
+
+    private func resolveMCPToken(
+        _ mcpToken: String?,
+        reuseSavedToken: Bool,
+        required: Bool
+    ) throws -> (value: String, shouldSave: Bool)? {
+        let trimmed = mcpToken?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmed.isEmpty {
+            return (trimmed, true)
+        }
+        if reuseSavedToken,
+           let saved = self.savedMCPToken(),
+           !saved.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        {
+            return (saved, false)
+        }
+        if required {
+            throw AgentExchangeError.missingMCPToken
+        }
+        return nil
     }
 
     private func cachedPendingInboxCount(from store: UserDefaults) -> Int {

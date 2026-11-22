@@ -616,6 +616,7 @@ public enum AgentExchangeError: LocalizedError, Sendable {
     case permissionDenied(String)
     case invalidRemoteURL(String)
     case missingRemoteToken
+    case missingMCPToken
     case remoteRequestFailed(statusCode: Int, message: String)
 
     public var errorDescription: String? {
@@ -627,7 +628,9 @@ public enum AgentExchangeError: LocalizedError, Sendable {
         case let .invalidRemoteURL(reason):
             reason
         case .missingRemoteToken:
-            "Remote endpoint token is missing from Keychain. Please re-enter it in Settings."
+            "Sync token is missing from Keychain. Please re-enter it in Settings."
+        case .missingMCPToken:
+            "AI MCP token is missing. Please enter both Sync Token and AI MCP Token."
         case let .remoteRequestFailed(statusCode, message):
             statusCode > 0 ? "HTTP \(statusCode): \(message)" : message
         }
