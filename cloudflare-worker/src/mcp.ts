@@ -54,6 +54,10 @@ function optNum(args: Record<string, unknown>, key: string): number | undefined 
   return typeof args[key] === "number" ? (args[key] as number) : undefined;
 }
 
+function optRawValue(args: Record<string, unknown>, key: string): unknown {
+  return args[key] === undefined ? undefined : args[key];
+}
+
 function optBool(args: Record<string, unknown>, key: string): boolean | undefined {
   return typeof args[key] === "boolean" ? (args[key] as boolean) : undefined;
 }
@@ -137,8 +141,9 @@ async function dispatchTool(
         credentialId: optNum(args, "credentialId"),
         currency: optStr(args, "currency"),
         tags: optStrArr(args, "tags"),
-        note: optStr(args, "note"),
+        note: optStr(args, "note") ?? optStr(args, "notes"),
         date: optStr(args, "date"),
+        hour: optRawValue(args, "hour"),
         requestId: optStr(args, "requestId"),
         client: optStr(args, "client")
       });
@@ -151,8 +156,9 @@ async function dispatchTool(
         clearCredential: optBool(args, "clearCredential"),
         currency: optStr(args, "currency"),
         tags: optStrArr(args, "tags"),
-        note: optStr(args, "note"),
+        note: optStr(args, "note") ?? optStr(args, "notes"),
         date: optStr(args, "date"),
+        hour: optRawValue(args, "hour"),
         requestId: optStr(args, "requestId"),
         client: optStr(args, "client")
       });
@@ -166,7 +172,7 @@ async function dispatchTool(
       return store.sx.recordRefund({
         paymentId: Number(args.paymentId),
         amount: Number(args.amount),
-        note: optStr(args, "note"),
+        note: optStr(args, "note") ?? optStr(args, "notes"),
         date: optStr(args, "date"),
         requestId: optStr(args, "requestId"),
         client: optStr(args, "client")
@@ -175,7 +181,7 @@ async function dispatchTool(
       return store.sx.updateRefund({
         id: Number(args.id),
         amount: optNum(args, "amount"),
-        note: optStr(args, "note"),
+        note: optStr(args, "note") ?? optStr(args, "notes"),
         date: optStr(args, "date"),
         requestId: optStr(args, "requestId"),
         client: optStr(args, "client")
@@ -193,7 +199,7 @@ async function dispatchTool(
         credentialId: optNum(args, "credentialId"),
         currency: optStr(args, "currency"),
         tags: optStrArr(args, "tags"),
-        note: optStr(args, "note"),
+        note: optStr(args, "note") ?? optStr(args, "notes"),
         date: optStr(args, "date"),
         requestId: optStr(args, "requestId"),
         client: optStr(args, "client")
@@ -207,7 +213,7 @@ async function dispatchTool(
         clearCredential: optBool(args, "clearCredential"),
         currency: optStr(args, "currency"),
         tags: optStrArr(args, "tags"),
-        note: optStr(args, "note"),
+        note: optStr(args, "note") ?? optStr(args, "notes"),
         date: optStr(args, "date"),
         requestId: optStr(args, "requestId"),
         client: optStr(args, "client")
@@ -222,7 +228,7 @@ async function dispatchTool(
       return store.sx.recordIncomeReversal({
         incomeId: Number(args.incomeId),
         amount: Number(args.amount),
-        note: optStr(args, "note"),
+        note: optStr(args, "note") ?? optStr(args, "notes"),
         date: optStr(args, "date"),
         requestId: optStr(args, "requestId"),
         client: optStr(args, "client")
@@ -231,7 +237,7 @@ async function dispatchTool(
       return store.sx.updateIncomeReversal({
         id: Number(args.id),
         amount: optNum(args, "amount"),
-        note: optStr(args, "note"),
+        note: optStr(args, "note") ?? optStr(args, "notes"),
         date: optStr(args, "date"),
         requestId: optStr(args, "requestId"),
         client: optStr(args, "client")
@@ -254,7 +260,7 @@ async function dispatchTool(
         startDate: optStr(args, "startDate"),
         endDate: optStr(args, "endDate"),
         isAutoRenew: optBool(args, "isAutoRenew"),
-        notes: optStr(args, "notes"),
+        notes: optStr(args, "notes") ?? optStr(args, "note"),
         requestId: optStr(args, "requestId"),
         client: optStr(args, "client")
       });
@@ -268,7 +274,7 @@ async function dispatchTool(
         priceType: optStr(args, "priceType"),
         projectType: optStr(args, "projectType"),
         cashFlowSides: optStr(args, "cashFlowSides"),
-        notes: optStr(args, "notes"),
+        notes: optStr(args, "notes") ?? optStr(args, "note"),
         requestId: optStr(args, "requestId"),
         client: optStr(args, "client")
       });
@@ -778,7 +784,7 @@ async function handleSingleRpc(msg: JsonRpcRequest, store: D1ExchangeStore): Pro
         const text =
           `Log this meal across SX and BX using chaox-agent:\n` +
           `1. Inspect status & catalogs (chaox_get_status, sx_get_catalog, bx_get_summary).\n` +
-          `2. Expense hint: amount=${promptArgs.amount ?? "infer"}, currency=${promptArgs.currency ?? "default"}.\n` +
+          `2. Expense hint: amount=${promptArgs.amount ?? "infer"}, currency=${promptArgs.currency ?? "default"}. Pass the meal's local hour via 'date' + 'hour' (0..23) or ISO-8601 with timezone offset, and put dish/merchant details in 'note'.\n` +
           `3. Meal hint: ${promptArgs.meal_description ?? "analyze photo ingredients and state estimated kcal cleanly"}.\n` +
           `4. Call sx_record_expense and bx_record_food with matching requestId prefix and report optimistic totals.`;
         return rpcResult(id, {

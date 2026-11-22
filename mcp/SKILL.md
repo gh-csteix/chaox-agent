@@ -23,3 +23,14 @@ Use the `chaox-agent` MCP server tools to read and manage permitted records for 
 - **Edit or Delete Records**: Call `sx_list_*`, `bx_list_*`, or `csteix_list_wuxu` first to obtain exact IDs (`number` for SX, `UUID` string for BX, `id`/`slug` + `revision` for CSTEIX Wuxu), confirm destructive deletes if requested or ambiguous, then invoke `update_*` or `delete_*`.
 - **Workout Annotations**: Inspect workouts with `bx_list_workouts` and look up exercise keys/equipment with `bx_list_exercises`, then use `bx_add_workout_exercise`, `bx_update_workout_exercise`, `bx_reorder_workout_exercises`, `bx_delete_workout_exercise`, or `bx_update_workout_type`.
 - **Wuxu Articles**: Use lowercase kebab-case `slug`s, at least one dimension from `["chaos", "spacetime", "existence", "ix"]`, pure body Markdown in `bodyZh` (without the `# Title` header skeleton), verbatim user lines in `rawNotes`, `expectedRevision` on edits, and `appendBodyZh`/`appendRawNotes` for same-day continuations.
+
+## SX Expense & Income Field Reference
+
+SX displays expense timestamps as **`YYYY-MM-DD-HH`** (e.g. `2026-11-22-09`, `2026-11-22-12`, `2026-11-21-00`). The trailing two digits **`HH`** are the **24-hour local hour (`00`–`23`)** in `sx_get_catalog.timeZoneIdentifier` — **never** minutes or a sequence number (`00` = midnight or hour unknown). Incomes show calendar-day precision (`YYYY-MM-DD`).
+
+- **`amount`** / **`netAmount`** / **`refundTotal`**: `amount` is gross payment (> 0); `netAmount = amount - refundTotal` is displayed on cards; refunds are logged separately with `sx_record_refund`.
+- **`projectName`**: Reusable project/category bucket from `sx_get_catalog` (`supportsExpense: true` or `supportsIncome: true`). Put specific merchants, dishes, or order details in **`note`** (write uses singular `note`; read returns plural `notes`).
+- **`date`** & **`hour`**: Pass ISO-8601 with timezone offset (`2026-11-22T12:00:00+08:00`), SX format (`2026-11-22-12` or `2026-11-22 12`), local (`2026-11-22 12:00`), or `YYYY-MM-DD` + `hour` (`0..23`). Bare `YYYY-MM-DD` without `hour` defaults to local `00:00` (`YYYY-MM-DD-00`). `sx_update_expense` applies partial patches in strict FIFO order on device, so sequential time fixes (`{ id, date: "2026-11-22", hour: 9 }` or `{ id, hour: 9 }`) can be queued without waiting for sync. Read items expose `paidAt`, `localDate`, `localHour`, and `displayDate`.
+- **`tags`**: Omit on create to inherit `recentExpenseTags` / `recentIncomeTags`; pass `[]` to clear all tags; pass tag names to set exact tags.
+- **`currency`**: Optional 3-letter ISO-4217 code (`CNY`, `USD`, ...); omit to inherit project currency.
+- **`isAutoRecorded`**, **`credentialId`**, **`requestId`**: `isAutoRecorded` marks scheduled subscription auto-records; `credentialId` is opt-in under `credentials`; `requestId` provides idempotency.

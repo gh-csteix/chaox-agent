@@ -1,12 +1,15 @@
 import {
   generateRequestId,
+  localDateHourParts,
+  localDateKey,
   matchesDateRange,
   matchesQuery,
   normalizePagination,
   paginate,
   requireNonEmptyString,
+  resolveSxTimestamp,
   safeJsonParse,
-  validateIsoTimestamp
+  validateLocalHour
 } from "./store-helpers.js";
 import { BxStoreContext } from "./store-bx.js";
 import {
@@ -23,6 +26,39 @@ const VALID_CYCLES = new Set(["daily", "weekly", "monthly", "quarterly", "yearly
 const VALID_PRICE_TYPES = new Set(["fixed", "floating"]);
 const VALID_PROJECT_TYPES = new Set(["nonRenewal", "autoRenew", "pausedRenew", "expired"]);
 const VALID_CASH_FLOW_PRESETS = new Set(["expenseOnly", "incomeOnly", "both"]);
+
+function catalogTimeZone(catalog: SxCatalog | null, fallbackTz?: string): string | undefined {
+  return catalog?.timeZoneIdentifier?.trim() || fallbackTz?.trim() || undefined;
+}
+
+function resolvedLocalTimeMeta(isoDate: string | undefined, timeZone?: string) {
+  if (!isoDate) return undefined;
+  const parts = localDateHourParts(isoDate, timeZone);
+  if (!parts) return undefined;
+  return {
+    paidAt: isoDate,
+    localDate: parts.localDate,
+    localHour: parts.localHour,
+    displayDate: parts.displayDate,
+    timeZoneIdentifier: timeZone ?? "UTC"
+  };
+}
+
+function enrichExpenseLocalFields(item: SxExpenseRecord, timeZone?: string): SxExpenseRecord {
+  const parts = localDateHourParts(item.paidAt, timeZone);
+  if (!parts) return item;
+  const isQueuedMutation = item.pendingStatus === "queued_create" || item.pendingStatus === "queued_update";
+  if (isQueuedMutation || !item.localDate) {
+    item.localDate = parts.localDate;
+  }
+  if (isQueuedMutation || item.localHour === undefined || item.localHour === null) {
+    item.localHour = parts.localHour;
+  }
+  if (isQueuedMutation || !item.displayDate) {
+    item.displayDate = parts.displayDate;
+  }
+  return item;
+}
 
 function normalizeCurrencyCode(raw: string | undefined, catalog: SxCatalog | null): string | undefined {
   const trimmed = raw?.trim().toUpperCase();
@@ -171,7 +207,7 @@ export class SxOperations {
           refundTotal: 0,
           currency: String(env.payload.currency ?? ""),
           tags: Array.isArray(env.payload.tags) ? env.payload.tags.map(String) : [],
-          notes: String(env.payload.note ?? ""),
+          notes: String(env.payload.note ?? env.payload.notes ?? ""),
           paidAt: String(env.payload.date ?? env.createdAt),
           pendingStatus: "queued_create",
           pendingRequestId: env.requestId
@@ -193,9 +229,12 @@ export class SxOperations {
           if (typeof env.payload.currency === "string") target.currency = env.payload.currency;
           if (Array.isArray(env.payload.tags)) target.tags = env.payload.tags.map(String);
           if (typeof env.payload.note === "string") target.notes = env.payload.note;
+          else if (typeof env.payload.notes === "string") target.notes = env.payload.notes;
           if (typeof env.payload.date === "string") {
             target.paidAt = env.payload.date;
             target.localDate = undefined;
+            target.localHour = undefined;
+            target.displayDate = undefined;
           }
           target.pendingStatus = "queued_update";
           target.pendingRequestId = env.requestId;
@@ -210,6 +249,9 @@ export class SxOperations {
     }
 
     const timeZone = await this.ctx.readAppTimeZone?.("sx");
+    for (const item of items) {
+      enrichExpenseLocalFields(item, timeZone);
+    }
     let filtered = items.filter((item) => matchesDateRange(item.paidAt, options.from, options.to, item.localDate, timeZone));
     if (typeof options.projectId === "number") {
       filtered = filtered.filter((item) => item.projectId === options.projectId);
@@ -239,6 +281,7 @@ export class SxOperations {
     const { limit, offset } = normalizePagination(options);
     return {
       datasetUploaded: dataset !== null,
+      timeZoneIdentifier: timeZone ?? null,
       ...paginate(filtered, limit, offset)
     };
   }
@@ -276,7 +319,7 @@ export class SxOperations {
           reversalTotal: 0,
           currency: String(env.payload.currency ?? ""),
           tags: Array.isArray(env.payload.tags) ? env.payload.tags.map(String) : [],
-          notes: String(env.payload.note ?? ""),
+          notes: String(env.payload.note ?? env.payload.notes ?? ""),
           receivedAt: String(env.payload.date ?? env.createdAt),
           pendingStatus: "queued_create",
           pendingRequestId: env.requestId
@@ -297,6 +340,7 @@ export class SxOperations {
           if (typeof env.payload.currency === "string") target.currency = env.payload.currency;
           if (Array.isArray(env.payload.tags)) target.tags = env.payload.tags.map(String);
           if (typeof env.payload.note === "string") target.notes = env.payload.note;
+          else if (typeof env.payload.notes === "string") target.notes = env.payload.notes;
           if (typeof env.payload.date === "string") {
             target.receivedAt = env.payload.date;
             target.localDate = undefined;
@@ -314,6 +358,12 @@ export class SxOperations {
     }
 
     const timeZone = await this.ctx.readAppTimeZone?.("sx");
+    for (const item of items) {
+      if (!item.localDate || item.pendingStatus === "queued_create" || item.pendingStatus === "queued_update") {
+        const key = localDateKey(item.receivedAt, timeZone);
+        if (key) item.localDate = key;
+      }
+    }
     let filtered = items.filter((item) =>
       matchesDateRange(item.receivedAt, options.from, options.to, item.localDate, timeZone)
     );
@@ -344,6 +394,7 @@ export class SxOperations {
     const { limit, offset } = normalizePagination(options);
     return {
       datasetUploaded: dataset !== null,
+      timeZoneIdentifier: timeZone ?? null,
       ...paginate(filtered, limit, offset)
     };
   }
@@ -462,6 +513,23 @@ export class SxOperations {
     return created;
   }
 
+  private async findExpenseForUpdate(id: number): Promise<SxExpenseRecord | null> {
+    const dataset = await this.ctx.readDataset<SxExpenseRecord>("sx", "expenses");
+    const match = dataset?.find((item) => item.id === id);
+    if (!match) return null;
+    const copy: SxExpenseRecord = { ...match };
+    const pending = await this.ctx.listPendingEnvelopes("sx");
+    for (const env of pending) {
+      if (env.op === "update_expense" && Number(env.payload.id) === id && typeof env.payload.date === "string") {
+        copy.paidAt = env.payload.date;
+        copy.localDate = undefined;
+      } else if (env.op === "delete_expense" && Number(env.payload.id) === id) {
+        return null;
+      }
+    }
+    return copy;
+  }
+
   private validateRecordPayload(
     input: {
       amount: number;
@@ -469,17 +537,21 @@ export class SxOperations {
       currency?: string;
       tags?: string[];
       note?: string;
+      notes?: string;
       date?: string;
+      hour?: unknown;
     },
     mode: "expense" | "income",
     catalogJson: string | null,
-    pendingProjects: Array<{ name: string; cashFlowSides: string }> = []
-  ): Record<string, unknown> {
+    pendingProjects: Array<{ name: string; cashFlowSides: string }> = [],
+    fallbackTimeZone?: string
+  ): { payload: Record<string, unknown>; timeZone?: string } {
     if (!Number.isFinite(input.amount) || input.amount <= 0) {
       throw new Error("SX amount must be a finite number greater than 0.");
     }
     const rawProject = requireNonEmptyString(input.projectName, "projectName");
     const catalog = safeJsonParse<SxCatalog>(catalogJson);
+    const timeZone = catalogTimeZone(catalog, fallbackTimeZone);
     const normalizedCurrency = normalizeCurrencyCode(input.currency, catalog);
 
     let normalizedProject = rawProject;
@@ -513,7 +585,12 @@ export class SxOperations {
       }
     }
 
-    const isoDate = validateIsoTimestamp(input.date, "date");
+    const isoDate = resolveSxTimestamp(input.date, "date", {
+      timeZone,
+      hour: mode === "expense" ? input.hour : undefined,
+      defaultLocalHour: 0,
+      allowHourOnly: mode === "expense"
+    });
     const payload: Record<string, unknown> = {
       amount: Math.round(input.amount * 100) / 100,
       projectName: normalizedProject
@@ -522,9 +599,10 @@ export class SxOperations {
     if (input.tags !== undefined) {
       payload.tags = input.tags.map((tag) => tag.trim()).filter((tag) => tag.length > 0);
     }
-    if (input.note?.trim()) payload.note = input.note.trim();
+    const mergedNote = input.note ?? input.notes;
+    if (mergedNote?.trim()) payload.note = mergedNote.trim();
     if (isoDate) payload.date = isoDate;
-    return payload;
+    return { payload, timeZone };
   }
 
   async recordExpense(input: {
@@ -534,20 +612,34 @@ export class SxOperations {
     currency?: string;
     tags?: string[];
     note?: string;
+    notes?: string;
     date?: string;
+    hour?: unknown;
     requestId?: string;
     client?: string;
   }): Promise<Record<string, unknown>> {
     const state = await this.ctx.assertActionAllowed("sx", "create", "expenses");
     const pendingProjects = await this.listPendingCreatedProjects();
-    const payload = this.validateRecordPayload(input, "expense", state.catalog_json, pendingProjects);
+    const fallbackTz = await this.ctx.readAppTimeZone?.("sx");
+    const { payload, timeZone } = this.validateRecordPayload(
+      input,
+      "expense",
+      state.catalog_json,
+      pendingProjects,
+      fallbackTz
+    );
     if (input.credentialId !== undefined) {
       await this.ctx.assertActionDomainAllowed?.("sx", "credentials");
       payload.credentialId = validateId(input.credentialId, "credentialId");
     }
     const requestId = input.requestId?.trim() || generateRequestId("sx-exp");
     payload.stableID = `sx:d1:${requestId}`;
-    return this.ctx.enqueueInbox("sx", "record_expense", requestId, input.client, payload);
+    const result = await this.ctx.enqueueInbox("sx", "record_expense", requestId, input.client, payload);
+    const localTime = resolvedLocalTimeMeta(
+      typeof payload.date === "string" ? payload.date : undefined,
+      timeZone
+    );
+    return localTime && result.queued === true ? { ...result, resolvedLocalTime: localTime } : result;
   }
 
   async updateExpense(input: {
@@ -559,7 +651,9 @@ export class SxOperations {
     currency?: string;
     tags?: string[];
     note?: string;
+    notes?: string;
     date?: string;
+    hour?: unknown;
     requestId?: string;
     client?: string;
   }): Promise<Record<string, unknown>> {
@@ -567,6 +661,7 @@ export class SxOperations {
     const id = validateId(input.id, "id");
     const payload: Record<string, unknown> = { id };
     const catalog = safeJsonParse<SxCatalog>(state.catalog_json);
+    const timeZone = catalogTimeZone(catalog, await this.ctx.readAppTimeZone?.("sx"));
 
     if (input.credentialId !== undefined || input.clearCredential === true) {
       await this.ctx.assertActionDomainAllowed?.("sx", "credentials");
@@ -592,15 +687,47 @@ export class SxOperations {
     }
     const tags = normalizeTagsArray(input.tags);
     if (tags !== undefined) payload.tags = tags;
-    if (input.note !== undefined) payload.note = input.note.trim();
-    const isoDate = validateIsoTimestamp(input.date, "date");
+    const resolvedNote = input.note !== undefined ? input.note : input.notes;
+    if (resolvedNote !== undefined) payload.note = resolvedNote.trim();
+
+    let isoDate: string | undefined;
+    const hasHourInput = input.hour !== undefined && input.hour !== null;
+    if (hasHourInput && !input.date?.trim()) {
+      const hour = validateLocalHour(input.hour);
+      const existing = await this.findExpenseForUpdate(id);
+      const existingLocalDate =
+        existing?.localDate?.trim() || localDateHourParts(existing?.paidAt, timeZone)?.localDate;
+      if (!existingLocalDate) {
+        throw new Error(
+          `Cannot update 'hour' alone because expense #${id} is not in the synced snapshot yet. Please provide 'date' (e.g. 'YYYY-MM-DD') together with 'hour'.`
+        );
+      }
+      isoDate = resolveSxTimestamp(existingLocalDate, "date", {
+        timeZone,
+        hour,
+        defaultLocalHour: 0,
+        allowHourOnly: false
+      });
+    } else if (input.date !== undefined || hasHourInput) {
+      isoDate = resolveSxTimestamp(input.date, "date", {
+        timeZone,
+        hour: input.hour,
+        defaultLocalHour: 0,
+        allowHourOnly: false
+      });
+    }
     if (isoDate) payload.date = isoDate;
 
     if (Object.keys(payload).length === 1) {
       throw new Error("update_expense requires at least one field to update.");
     }
     const requestId = input.requestId?.trim() || generateRequestId("sx-exp-upd");
-    return this.ctx.enqueueInbox("sx", "update_expense", requestId, input.client, payload);
+    const result = await this.ctx.enqueueInbox("sx", "update_expense", requestId, input.client, payload);
+    const localTime = resolvedLocalTimeMeta(
+      typeof payload.date === "string" ? payload.date : undefined,
+      timeZone
+    );
+    return localTime && result.queued === true ? { ...result, resolvedLocalTime: localTime } : result;
   }
 
   async deleteExpense(input: { id: number; requestId?: string; client?: string }): Promise<Record<string, unknown>> {
@@ -614,11 +741,14 @@ export class SxOperations {
     paymentId: number;
     amount: number;
     note?: string;
+    notes?: string;
     date?: string;
     requestId?: string;
     client?: string;
   }): Promise<Record<string, unknown>> {
-    await this.ctx.assertActionAllowed("sx", "create", "expenses");
+    const state = await this.ctx.assertActionAllowed("sx", "create", "expenses");
+    const catalog = safeJsonParse<SxCatalog>(state.catalog_json);
+    const timeZone = catalogTimeZone(catalog, await this.ctx.readAppTimeZone?.("sx"));
     const paymentId = validateId(input.paymentId, "paymentId");
     if (!Number.isFinite(input.amount) || input.amount <= 0) {
       throw new Error("Refund 'amount' must be > 0.");
@@ -627,8 +757,9 @@ export class SxOperations {
       paymentId,
       amount: Math.round(input.amount * 100) / 100
     };
-    if (input.note?.trim()) payload.note = input.note.trim();
-    const isoDate = validateIsoTimestamp(input.date, "date");
+    const mergedNote = input.note ?? input.notes;
+    if (mergedNote?.trim()) payload.note = mergedNote.trim();
+    const isoDate = resolveSxTimestamp(input.date, "date", { timeZone, defaultLocalHour: 0 });
     if (isoDate) payload.date = isoDate;
 
     const requestId = input.requestId?.trim() || generateRequestId("sx-ref");
@@ -639,19 +770,23 @@ export class SxOperations {
     id: number;
     amount?: number;
     note?: string;
+    notes?: string;
     date?: string;
     requestId?: string;
     client?: string;
   }): Promise<Record<string, unknown>> {
-    await this.ctx.assertActionAllowed("sx", "update", "expenses");
+    const state = await this.ctx.assertActionAllowed("sx", "update", "expenses");
+    const catalog = safeJsonParse<SxCatalog>(state.catalog_json);
+    const timeZone = catalogTimeZone(catalog, await this.ctx.readAppTimeZone?.("sx"));
     const id = validateId(input.id, "id");
     const payload: Record<string, unknown> = { id };
     if (input.amount !== undefined) {
       if (!Number.isFinite(input.amount) || input.amount <= 0) throw new Error("Refund 'amount' must be > 0.");
       payload.amount = Math.round(input.amount * 100) / 100;
     }
-    if (input.note !== undefined) payload.note = input.note.trim();
-    const isoDate = validateIsoTimestamp(input.date, "date");
+    const resolvedNote = input.note !== undefined ? input.note : input.notes;
+    if (resolvedNote !== undefined) payload.note = resolvedNote.trim();
+    const isoDate = resolveSxTimestamp(input.date, "date", { timeZone, defaultLocalHour: 0 });
     if (isoDate) payload.date = isoDate;
     if (Object.keys(payload).length === 1) throw new Error("update_refund requires at least one field to update.");
     const requestId = input.requestId?.trim() || generateRequestId("sx-ref-upd");
@@ -674,13 +809,21 @@ export class SxOperations {
     currency?: string;
     tags?: string[];
     note?: string;
+    notes?: string;
     date?: string;
     requestId?: string;
     client?: string;
   }): Promise<Record<string, unknown>> {
     const state = await this.ctx.assertActionAllowed("sx", "create", "incomes");
     const pendingProjects = await this.listPendingCreatedProjects();
-    const payload = this.validateRecordPayload(input, "income", state.catalog_json, pendingProjects);
+    const fallbackTz = await this.ctx.readAppTimeZone?.("sx");
+    const { payload } = this.validateRecordPayload(
+      input,
+      "income",
+      state.catalog_json,
+      pendingProjects,
+      fallbackTz
+    );
     if (input.credentialId !== undefined) {
       await this.ctx.assertActionDomainAllowed?.("sx", "credentials");
       payload.credentialId = validateId(input.credentialId, "credentialId");
@@ -699,6 +842,7 @@ export class SxOperations {
     currency?: string;
     tags?: string[];
     note?: string;
+    notes?: string;
     date?: string;
     requestId?: string;
     client?: string;
@@ -707,6 +851,7 @@ export class SxOperations {
     const id = validateId(input.id, "id");
     const payload: Record<string, unknown> = { id };
     const catalog = safeJsonParse<SxCatalog>(state.catalog_json);
+    const timeZone = catalogTimeZone(catalog, await this.ctx.readAppTimeZone?.("sx"));
 
     if (input.credentialId !== undefined || input.clearCredential === true) {
       await this.ctx.assertActionDomainAllowed?.("sx", "credentials");
@@ -728,8 +873,9 @@ export class SxOperations {
     }
     const tags = normalizeTagsArray(input.tags);
     if (tags !== undefined) payload.tags = tags;
-    if (input.note !== undefined) payload.note = input.note.trim();
-    const isoDate = validateIsoTimestamp(input.date, "date");
+    const resolvedNote = input.note !== undefined ? input.note : input.notes;
+    if (resolvedNote !== undefined) payload.note = resolvedNote.trim();
+    const isoDate = resolveSxTimestamp(input.date, "date", { timeZone, defaultLocalHour: 0 });
     if (isoDate) payload.date = isoDate;
     if (Object.keys(payload).length === 1) throw new Error("update_income requires at least one field to update.");
 
@@ -748,11 +894,14 @@ export class SxOperations {
     incomeId: number;
     amount: number;
     note?: string;
+    notes?: string;
     date?: string;
     requestId?: string;
     client?: string;
   }): Promise<Record<string, unknown>> {
-    await this.ctx.assertActionAllowed("sx", "create", "incomes");
+    const state = await this.ctx.assertActionAllowed("sx", "create", "incomes");
+    const catalog = safeJsonParse<SxCatalog>(state.catalog_json);
+    const timeZone = catalogTimeZone(catalog, await this.ctx.readAppTimeZone?.("sx"));
     const incomeId = validateId(input.incomeId, "incomeId");
     if (!Number.isFinite(input.amount) || input.amount <= 0) {
       throw new Error("Income reversal 'amount' must be > 0.");
@@ -761,8 +910,9 @@ export class SxOperations {
       incomeId,
       amount: Math.round(input.amount * 100) / 100
     };
-    if (input.note?.trim()) payload.note = input.note.trim();
-    const isoDate = validateIsoTimestamp(input.date, "date");
+    const mergedNote = input.note ?? input.notes;
+    if (mergedNote?.trim()) payload.note = mergedNote.trim();
+    const isoDate = resolveSxTimestamp(input.date, "date", { timeZone, defaultLocalHour: 0 });
     if (isoDate) payload.date = isoDate;
 
     const requestId = input.requestId?.trim() || generateRequestId("sx-rev");
@@ -773,19 +923,23 @@ export class SxOperations {
     id: number;
     amount?: number;
     note?: string;
+    notes?: string;
     date?: string;
     requestId?: string;
     client?: string;
   }): Promise<Record<string, unknown>> {
-    await this.ctx.assertActionAllowed("sx", "update", "incomes");
+    const state = await this.ctx.assertActionAllowed("sx", "update", "incomes");
+    const catalog = safeJsonParse<SxCatalog>(state.catalog_json);
+    const timeZone = catalogTimeZone(catalog, await this.ctx.readAppTimeZone?.("sx"));
     const id = validateId(input.id, "id");
     const payload: Record<string, unknown> = { id };
     if (input.amount !== undefined) {
       if (!Number.isFinite(input.amount) || input.amount <= 0) throw new Error("Income reversal 'amount' must be > 0.");
       payload.amount = Math.round(input.amount * 100) / 100;
     }
-    if (input.note !== undefined) payload.note = input.note.trim();
-    const isoDate = validateIsoTimestamp(input.date, "date");
+    const resolvedNote = input.note !== undefined ? input.note : input.notes;
+    if (resolvedNote !== undefined) payload.note = resolvedNote.trim();
+    const isoDate = resolveSxTimestamp(input.date, "date", { timeZone, defaultLocalHour: 0 });
     if (isoDate) payload.date = isoDate;
     if (Object.keys(payload).length === 1) throw new Error("update_income_reversal requires at least one field to update.");
     const requestId = input.requestId?.trim() || generateRequestId("sx-rev-upd");
@@ -813,12 +967,14 @@ export class SxOperations {
     endDate?: string;
     isAutoRenew?: boolean;
     notes?: string;
+    note?: string;
     requestId?: string;
     client?: string;
   }): Promise<Record<string, unknown>> {
     const state = await this.ctx.assertActionAllowed("sx", "create", "projects");
     const name = requireNonEmptyString(input.name, "name");
     const catalog = safeJsonParse<SxCatalog>(state.catalog_json);
+    const timeZone = catalogTimeZone(catalog, await this.ctx.readAppTimeZone?.("sx"));
     const currency = normalizeCurrencyCode(input.currency, catalog);
 
     if (input.cycle && !VALID_CYCLES.has(input.cycle)) throw new Error(`Invalid cycle '${input.cycle}'.`);
@@ -840,12 +996,13 @@ export class SxOperations {
     if (input.priceType) payload.priceType = input.priceType;
     if (input.projectType) payload.projectType = input.projectType;
     if (input.cashFlowSides) payload.cashFlowSides = input.cashFlowSides;
-    const start = validateIsoTimestamp(input.startDate, "startDate");
+    const start = resolveSxTimestamp(input.startDate, "startDate", { timeZone, defaultLocalHour: 0 });
     if (start) payload.startDate = start;
-    const end = validateIsoTimestamp(input.endDate, "endDate");
+    const end = resolveSxTimestamp(input.endDate, "endDate", { timeZone, defaultLocalHour: 0 });
     if (end) payload.endDate = end;
     if (input.isAutoRenew !== undefined) payload.isAutoRenew = input.isAutoRenew;
-    if (input.notes?.trim()) payload.notes = input.notes.trim();
+    const mergedNotes = input.notes ?? input.note;
+    if (mergedNotes?.trim()) payload.notes = mergedNotes.trim();
 
     const requestId = input.requestId?.trim() || generateRequestId("sx-proj");
     return this.ctx.enqueueInbox("sx", "create_project", requestId, input.client, payload);
@@ -861,6 +1018,7 @@ export class SxOperations {
     projectType?: string;
     cashFlowSides?: string;
     notes?: string;
+    note?: string;
     requestId?: string;
     client?: string;
   }): Promise<Record<string, unknown>> {
@@ -896,7 +1054,8 @@ export class SxOperations {
       }
       payload.cashFlowSides = input.cashFlowSides;
     }
-    if (input.notes !== undefined) payload.notes = input.notes.trim();
+    const resolvedNotes = input.notes !== undefined ? input.notes : input.note;
+    if (resolvedNotes !== undefined) payload.notes = resolvedNotes.trim();
     if (Object.keys(payload).length === 1) throw new Error("update_project requires at least one field to update.");
 
     const requestId = input.requestId?.trim() || generateRequestId("sx-proj-upd");
@@ -1100,32 +1259,35 @@ export class SxOperations {
     };
   }
 
-  private buildCredentialLinkSchedulePayload(input: {
-    startDate?: string;
-    hasStartDate?: boolean;
-    endDate?: string;
-    clearEndDate?: boolean;
-    isAutoRenew?: boolean;
-    nextRenewalDate?: string;
-    clearNextRenewalDate?: boolean;
-    renewalHour?: number;
-    renewalWeekdays?: number;
-  }): Record<string, unknown> {
+  private buildCredentialLinkSchedulePayload(
+    input: {
+      startDate?: string;
+      hasStartDate?: boolean;
+      endDate?: string;
+      clearEndDate?: boolean;
+      isAutoRenew?: boolean;
+      nextRenewalDate?: string;
+      clearNextRenewalDate?: boolean;
+      renewalHour?: number;
+      renewalWeekdays?: number;
+    },
+    timeZone?: string
+  ): Record<string, unknown> {
     const out: Record<string, unknown> = {};
-    const start = validateIsoTimestamp(input.startDate, "startDate");
+    const start = resolveSxTimestamp(input.startDate, "startDate", { timeZone, defaultLocalHour: 0 });
     if (start) out.startDate = start;
     if (input.hasStartDate !== undefined) out.hasStartDate = Boolean(input.hasStartDate);
     if (input.clearEndDate) {
       out.clearEndDate = true;
     } else {
-      const end = validateIsoTimestamp(input.endDate, "endDate");
+      const end = resolveSxTimestamp(input.endDate, "endDate", { timeZone, defaultLocalHour: 0 });
       if (end) out.endDate = end;
     }
     if (input.isAutoRenew !== undefined) out.isAutoRenew = Boolean(input.isAutoRenew);
     if (input.clearNextRenewalDate) {
       out.clearNextRenewalDate = true;
     } else {
-      const next = validateIsoTimestamp(input.nextRenewalDate, "nextRenewalDate");
+      const next = resolveSxTimestamp(input.nextRenewalDate, "nextRenewalDate", { timeZone, defaultLocalHour: 0 });
       if (next) out.nextRenewalDate = next;
     }
     if (input.renewalHour !== undefined) {
@@ -1166,6 +1328,8 @@ export class SxOperations {
     if (input.projectId !== undefined && rawProjectName) {
       throw new Error("Provide either 'projectId' or 'projectName', not both.");
     }
+    const catalog = safeJsonParse<SxCatalog>(state.catalog_json);
+    const timeZone = catalogTimeZone(catalog, await this.ctx.readAppTimeZone?.("sx"));
     const payload: Record<string, unknown> = { username };
     if (input.website !== undefined) payload.website = input.website.trim();
     if (input.type !== undefined) payload.type = input.type.trim();
@@ -1173,7 +1337,6 @@ export class SxOperations {
     if (input.projectId !== undefined) {
       payload.projectId = validateId(input.projectId, "projectId");
     } else if (rawProjectName) {
-      const catalog = safeJsonParse<SxCatalog>(state.catalog_json);
       const pendingProjects = await this.listPendingCreatedProjects();
       const catalogMatch = catalog?.projects?.find(
         (proj) => proj.name.trim().toLowerCase() === rawProjectName.toLowerCase()
@@ -1193,7 +1356,7 @@ export class SxOperations {
         payload.projectName = rawProjectName;
       }
     }
-    Object.assign(payload, this.buildCredentialLinkSchedulePayload(input));
+    Object.assign(payload, this.buildCredentialLinkSchedulePayload(input, timeZone));
     const requestId = input.requestId?.trim() || generateRequestId("sx-cred");
     return this.ctx.enqueueInbox("sx", "create_credential", requestId, input.client, payload);
   }
@@ -1241,13 +1404,15 @@ export class SxOperations {
     requestId?: string;
     client?: string;
   }): Promise<Record<string, unknown>> {
-    await this.ctx.assertActionAllowed("sx", "create", "credentials");
+    const state = await this.ctx.assertActionAllowed("sx", "create", "credentials");
+    const catalog = safeJsonParse<SxCatalog>(state.catalog_json);
+    const timeZone = catalogTimeZone(catalog, await this.ctx.readAppTimeZone?.("sx"));
     const credentialId = validateId(input.credentialId, "credentialId");
     const projectId = validateId(input.projectId, "projectId");
     const payload: Record<string, unknown> = {
       credentialId,
       projectId,
-      ...this.buildCredentialLinkSchedulePayload(input)
+      ...this.buildCredentialLinkSchedulePayload(input, timeZone)
     };
     const requestId = input.requestId?.trim() || generateRequestId("sx-cred-lnk");
     return this.ctx.enqueueInbox("sx", "link_credential", requestId, input.client, payload);
@@ -1268,10 +1433,12 @@ export class SxOperations {
     requestId?: string;
     client?: string;
   }): Promise<Record<string, unknown>> {
-    await this.ctx.assertActionAllowed("sx", "update", "credentials");
+    const state = await this.ctx.assertActionAllowed("sx", "update", "credentials");
+    const catalog = safeJsonParse<SxCatalog>(state.catalog_json);
+    const timeZone = catalogTimeZone(catalog, await this.ctx.readAppTimeZone?.("sx"));
     const credentialId = validateId(input.credentialId, "credentialId");
     const projectId = validateId(input.projectId, "projectId");
-    const scheduleFields = this.buildCredentialLinkSchedulePayload(input);
+    const scheduleFields = this.buildCredentialLinkSchedulePayload(input, timeZone);
     if (Object.keys(scheduleFields).length === 0) {
       throw new Error("update_credential_link requires at least one date or renewal setting to update.");
     }

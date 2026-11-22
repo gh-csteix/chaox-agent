@@ -51,6 +51,7 @@ async function makeTempExchangeDir(): Promise<string> {
     path.join(dir, "sx", "catalog.json"),
     JSON.stringify({
       generatedAt: "2026-11-21T10:00:00.000Z",
+      timeZoneIdentifier: "Asia/Shanghai",
       summaryCurrency: "CNY",
       supportedCurrencies: ["CNY", "USD"],
       projects: [
@@ -301,6 +302,47 @@ test("HTTP transport serves /health, enforces Bearer token, and responds to MCP 
     assert.match(bodyText, /chaox_get_status/);
   } finally {
     await started.close();
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolves SX date, local hour, YYYY-MM-DD-HH format, and notes alias in catalog timezone", async () => {
+  const dir = await makeTempExchangeDir();
+  try {
+    const client = new ChaoxExchangeClient(dir);
+
+    const bareDay = await client.recordSxExpense({
+      amount: 12,
+      projectName: "Daily Meals",
+      date: "2026-11-21",
+      requestId: "mcp-tz-bare"
+    });
+    assert.equal(bareDay.normalizedPayload.date, "2026-11-20T16:00:00.000Z");
+
+    const withHourAndAlias = await client.recordSxExpense({
+      amount: 18.5,
+      projectName: "Daily Meals",
+      date: "2026-11-22",
+      hour: 12,
+      notes: "Light salad",
+      requestId: "mcp-tz-hour"
+    });
+    assert.equal(withHourAndAlias.normalizedPayload.date, "2026-11-22T04:00:00.000Z");
+    assert.equal(withHourAndAlias.normalizedPayload.note, "Light salad");
+
+    const withDisplayFormat = await client.recordSxExpense({
+      amount: 21,
+      projectName: "Daily Meals",
+      date: "2026-11-22-09",
+      requestId: "mcp-tz-display"
+    });
+    assert.equal(withDisplayFormat.normalizedPayload.date, "2026-11-22T01:00:00.000Z");
+
+    await assert.rejects(
+      () => client.recordSxExpense({ amount: 10, projectName: "Daily Meals", date: "2026-11-22", hour: 25 }),
+      /'hour' must be an integer between 0 and 23/
+    );
+  } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
 });

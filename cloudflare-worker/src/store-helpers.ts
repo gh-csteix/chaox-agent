@@ -139,6 +139,224 @@ export function safeJsonParse<T>(raw: string | null | undefined): T | null {
   }
 }
 
+export function effectiveTimeZone(timeZoneIdentifier?: string): string {
+  const tz = timeZoneIdentifier?.trim();
+  if (tz) {
+    try {
+      new Intl.DateTimeFormat("en-US", { timeZone: tz });
+      return tz;
+    } catch {
+      // Fall back to UTC if the supplied timezone identifier is invalid.
+    }
+  }
+  return "UTC";
+}
+
+export function zonedLocalToUtcIso(
+  year: number,
+  month: number,
+  day: number,
+  hour: number,
+  minute: number,
+  second: number,
+  timeZone: string
+): string {
+  const targetUtcMs = Date.UTC(year, month - 1, day, hour, minute, second, 0);
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: effectiveTimeZone(timeZone),
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23"
+  });
+
+  const partsMs = (ms: number): number => {
+    const parts = formatter.formatToParts(new Date(ms));
+    const map: Record<string, number> = {};
+    for (const part of parts) {
+      if (part.type !== "literal") map[part.type] = Number(part.value);
+    }
+    const h = map.hour === 24 ? 0 : map.hour;
+    return Date.UTC(map.year, map.month - 1, map.day, h, map.minute, map.second, 0);
+  };
+
+  let guess = targetUtcMs;
+  for (let i = 0; i < 3; i += 1) {
+    const represented = partsMs(guess);
+    const diff = represented - targetUtcMs;
+    if (diff === 0) break;
+    guess -= diff;
+  }
+
+  // Validate that the requested calendar date/time actually existed (e.g. reject Feb 30 or hour 25).
+  const checkDate = new Date(Date.UTC(year, month - 1, day, hour, minute, second, 0));
+  if (
+    checkDate.getUTCFullYear() !== year ||
+    checkDate.getUTCMonth() !== month - 1 ||
+    checkDate.getUTCDate() !== day ||
+    checkDate.getUTCHours() !== hour ||
+    checkDate.getUTCMinutes() !== minute ||
+    checkDate.getUTCSeconds() !== second
+  ) {
+    throw new Error(
+      `Invalid calendar timestamp: ${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")} ${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`
+    );
+  }
+
+  return new Date(guess).toISOString();
+}
+
+export function localDateHourParts(
+  timestampIso: string | undefined,
+  timeZoneIdentifier?: string
+): { localDate: string; localHour: number; displayDate: string } | null {
+  const trimmed = timestampIso?.trim() ?? "";
+  if (!trimmed) return null;
+  const ms = Date.parse(trimmed);
+  if (Number.isNaN(ms)) return null;
+
+  const tz = effectiveTimeZone(timeZoneIdentifier);
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    hourCycle: "h23"
+  }).formatToParts(new Date(ms));
+  const map: Record<string, string> = {};
+  for (const part of parts) {
+    if (part.type !== "literal") map[part.type] = part.value;
+  }
+  if (!map.year || !map.month || !map.day || map.hour === undefined) return null;
+  const localHour = Number(map.hour) === 24 ? 0 : Number(map.hour);
+  const localDate = `${map.year}-${map.month}-${map.day}`;
+  return {
+    localDate,
+    localHour,
+    displayDate: `${localDate}-${String(localHour).padStart(2, "0")}`
+  };
+}
+
+export function validateLocalHour(raw: unknown, fieldName = "hour"): number | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw === "number") {
+    if (!Number.isInteger(raw) || raw < 0 || raw > 23) {
+      throw new Error(
+        `'${fieldName}' must be an integer between 0 and 23 (24-hour local clock in SX time zone).`
+      );
+    }
+    return raw;
+  }
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (/^\d{1,2}$/.test(trimmed)) {
+      const parsed = Number(trimmed);
+      if (parsed >= 0 && parsed <= 23) {
+        return parsed;
+      }
+    }
+  }
+  throw new Error(
+    `'${fieldName}' must be an integer between 0 and 23 (24-hour local clock in SX time zone).`
+  );
+}
+
+export function resolveSxTimestamp(
+  rawDate: unknown,
+  fieldName: string,
+  options: {
+    timeZone?: string;
+    hour?: unknown;
+    defaultLocalHour?: number;
+    allowHourOnly?: boolean;
+    now?: Date;
+  } = {}
+): string | undefined {
+  const explicitHour = validateLocalHour(options.hour);
+  const tz = effectiveTimeZone(options.timeZone);
+
+  if (rawDate === undefined || rawDate === null || (typeof rawDate === "string" && !rawDate.trim())) {
+    if (explicitHour !== undefined && options.allowHourOnly) {
+      const todayParts = localDateHourParts((options.now ?? new Date()).toISOString(), tz);
+      if (!todayParts) return undefined;
+      const [y, m, d] = todayParts.localDate.split("-").map(Number);
+      return zonedLocalToUtcIso(y, m, d, explicitHour, 0, 0, tz);
+    }
+    return undefined;
+  }
+
+  if (typeof rawDate !== "string") {
+    throw new Error(
+      `Invalid '${fieldName}'. Expected ISO-8601 ('2026-11-22T12:00:00+08:00'), SX display format ('2026-11-22-12'), or 'YYYY-MM-DD'.`
+    );
+  }
+
+  const trimmed = rawDate.trim();
+
+  // Case A: SX display date+hour formats: YYYY-MM-DD-HH, YYYY-MM-DD HH, or YYYY-MM-DDTHH.
+  const displayMatch = /^(\d{4})-(\d{2})-(\d{2})[-T ](\d{2})$/.exec(trimmed);
+  if (displayMatch) {
+    const year = Number(displayMatch[1]);
+    const month = Number(displayMatch[2]);
+    const day = Number(displayMatch[3]);
+    const parsedHour = Number(displayMatch[4]);
+    if (parsedHour < 0 || parsedHour > 23) {
+      throw new Error(
+        `Invalid local hour '${displayMatch[4]}' in '${fieldName}': ${rawDate}. Expected 00-23.`
+      );
+    }
+    return zonedLocalToUtcIso(year, month, day, explicitHour ?? parsedHour, 0, 0, tz);
+  }
+
+  // Case B: Bare calendar date YYYY-MM-DD -> local midnight (or explicit hour) in SX time zone.
+  const dateOnlyMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(trimmed);
+  if (dateOnlyMatch) {
+    const year = Number(dateOnlyMatch[1]);
+    const month = Number(dateOnlyMatch[2]);
+    const day = Number(dateOnlyMatch[3]);
+    return zonedLocalToUtcIso(year, month, day, explicitHour ?? options.defaultLocalHour ?? 0, 0, 0, tz);
+  }
+
+  // Case C: Local date-time without timezone suffix (YYYY-MM-DD HH:mm[:ss]) -> interpret in SX time zone.
+  const localDateTimeMatch = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,3})?)?$/.exec(
+    trimmed
+  );
+  if (localDateTimeMatch) {
+    const year = Number(localDateTimeMatch[1]);
+    const month = Number(localDateTimeMatch[2]);
+    const day = Number(localDateTimeMatch[3]);
+    const parsedHour = Number(localDateTimeMatch[4]);
+    const minute = Number(localDateTimeMatch[5]);
+    const second = localDateTimeMatch[6] !== undefined ? Number(localDateTimeMatch[6]) : 0;
+    const validatedIso = zonedLocalToUtcIso(year, month, day, parsedHour, minute, second, tz);
+    if (explicitHour !== undefined) {
+      return zonedLocalToUtcIso(year, month, day, explicitHour, 0, 0, tz);
+    }
+    return validatedIso;
+  }
+
+  // Case D: Full ISO-8601 with explicit offset or Z.
+  const parsed = Date.parse(trimmed);
+  if (Number.isNaN(parsed)) {
+    throw new Error(
+      `Invalid '${fieldName}': ${rawDate}. Accepted formats: '2026-11-22T12:00:00+08:00', '2026-11-22-12', or '2026-11-22' (optionally with 'hour' 0..23).`
+    );
+  }
+  const iso = new Date(parsed).toISOString();
+  if (explicitHour !== undefined) {
+    const parts = localDateHourParts(iso, tz);
+    if (parts) {
+      const [y, m, d] = parts.localDate.split("-").map(Number);
+      return zonedLocalToUtcIso(y, m, d, explicitHour, 0, 0, tz);
+    }
+  }
+  return iso;
+}
+
 export function validateIsoTimestamp(raw: unknown, fieldName: string): string | undefined {
   if (raw === undefined || raw === null) return undefined;
   if (typeof raw !== "string") {

@@ -76,6 +76,7 @@ export interface SxCatalogProject {
 
 export interface SxCatalog {
   generatedAt?: string;
+  timeZoneIdentifier?: string;
   summaryCurrency?: string;
   supportedCurrencies?: string[];
   projects?: SxCatalogProject[];
@@ -140,7 +141,9 @@ export interface RecordSxExpenseInput {
   currency?: string;
   tags?: string[];
   note?: string;
+  notes?: string;
   date?: string;
+  hour?: number | string;
   requestId?: string;
   client?: string;
 }
@@ -151,6 +154,7 @@ export interface RecordSxIncomeInput {
   currency?: string;
   tags?: string[];
   note?: string;
+  notes?: string;
   date?: string;
   requestId?: string;
   client?: string;
@@ -226,6 +230,176 @@ export function sanitizedFilenameComponent(raw: string): string {
 export function generateRequestId(prefix: string): string {
   const short = crypto.randomUUID().replace(/-/g, "").slice(0, 12);
   return `${prefix}-${short}`;
+}
+
+function effectiveTimeZone(timeZoneIdentifier?: string): string {
+  const tz = timeZoneIdentifier?.trim();
+  if (tz) {
+    try {
+      new Intl.DateTimeFormat("en-US", { timeZone: tz });
+      return tz;
+    } catch {
+      // Ignore invalid timezone identifier and fall back to local/UTC.
+    }
+  }
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+}
+
+function zonedLocalToUtcIso(
+  year: number,
+  month: number,
+  day: number,
+  hour: number,
+  minute: number,
+  second: number,
+  timeZone: string
+): string {
+  const targetUtcMs = Date.UTC(year, month - 1, day, hour, minute, second, 0);
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: effectiveTimeZone(timeZone),
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23"
+  });
+  const partsMs = (ms: number): number => {
+    const parts = formatter.formatToParts(new Date(ms));
+    const map: Record<string, number> = {};
+    for (const part of parts) {
+      if (part.type !== "literal") map[part.type] = Number(part.value);
+    }
+    const h = map.hour === 24 ? 0 : map.hour;
+    return Date.UTC(map.year, map.month - 1, map.day, h, map.minute, map.second, 0);
+  };
+  let guess = targetUtcMs;
+  for (let i = 0; i < 3; i += 1) {
+    const diff = partsMs(guess) - targetUtcMs;
+    if (diff === 0) break;
+    guess -= diff;
+  }
+  const checkDate = new Date(Date.UTC(year, month - 1, day, hour, minute, second, 0));
+  if (
+    checkDate.getUTCFullYear() !== year ||
+    checkDate.getUTCMonth() !== month - 1 ||
+    checkDate.getUTCDate() !== day ||
+    checkDate.getUTCHours() !== hour ||
+    checkDate.getUTCMinutes() !== minute ||
+    checkDate.getUTCSeconds() !== second
+  ) {
+    throw new Error(`Invalid calendar timestamp: ${year}-${month}-${day} ${hour}:${minute}`);
+  }
+  return new Date(guess).toISOString();
+}
+
+function resolveSxTimestamp(
+  rawDate: string | undefined,
+  fieldName: string,
+  options: { timeZone?: string; hour?: unknown; allowHourOnly?: boolean } = {}
+): string | undefined {
+  let parsedExplicitHour: number | undefined;
+  if (options.hour !== undefined && options.hour !== null) {
+    if (typeof options.hour === "number") {
+      if (!Number.isInteger(options.hour) || options.hour < 0 || options.hour > 23) {
+        throw new Error("'hour' must be an integer between 0 and 23 (24-hour local clock in SX time zone).");
+      }
+      parsedExplicitHour = options.hour;
+    } else if (typeof options.hour === "string" && /^\d{1,2}$/.test(options.hour.trim())) {
+      const n = Number(options.hour.trim());
+      if (n < 0 || n > 23) {
+        throw new Error("'hour' must be an integer between 0 and 23 (24-hour local clock in SX time zone).");
+      }
+      parsedExplicitHour = n;
+    } else {
+      throw new Error("'hour' must be an integer between 0 and 23 (24-hour local clock in SX time zone).");
+    }
+  }
+  const tz = effectiveTimeZone(options.timeZone);
+  const trimmed = rawDate?.trim();
+  if (!trimmed) {
+    if (parsedExplicitHour !== undefined && options.allowHourOnly) {
+      const parts = new Intl.DateTimeFormat("en-US", {
+        timeZone: tz,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit"
+      }).formatToParts(new Date());
+      const map: Record<string, string> = {};
+      for (const p of parts) {
+        if (p.type !== "literal") map[p.type] = p.value;
+      }
+      return zonedLocalToUtcIso(Number(map.year), Number(map.month), Number(map.day), parsedExplicitHour, 0, 0, tz);
+    }
+    return undefined;
+  }
+
+  const displayMatch = /^(\d{4})-(\d{2})-(\d{2})[-T ](\d{2})$/.exec(trimmed);
+  if (displayMatch) {
+    const parsedHour = Number(displayMatch[4]);
+    if (parsedHour < 0 || parsedHour > 23) {
+      throw new Error(`Invalid local hour '${displayMatch[4]}' in '${fieldName}': ${rawDate}. Expected 00-23.`);
+    }
+    return zonedLocalToUtcIso(
+      Number(displayMatch[1]),
+      Number(displayMatch[2]),
+      Number(displayMatch[3]),
+      parsedExplicitHour ?? parsedHour,
+      0,
+      0,
+      tz
+    );
+  }
+
+  const dateOnlyMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(trimmed);
+  if (dateOnlyMatch) {
+    return zonedLocalToUtcIso(
+      Number(dateOnlyMatch[1]),
+      Number(dateOnlyMatch[2]),
+      Number(dateOnlyMatch[3]),
+      parsedExplicitHour ?? 0,
+      0,
+      0,
+      tz
+    );
+  }
+
+  const localDateTimeMatch = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,3})?)?$/.exec(
+    trimmed
+  );
+  if (localDateTimeMatch) {
+    const y = Number(localDateTimeMatch[1]);
+    const m = Number(localDateTimeMatch[2]);
+    const d = Number(localDateTimeMatch[3]);
+    const h = Number(localDateTimeMatch[4]);
+    const min = Number(localDateTimeMatch[5]);
+    const sec = localDateTimeMatch[6] !== undefined ? Number(localDateTimeMatch[6]) : 0;
+    const iso = zonedLocalToUtcIso(y, m, d, h, min, sec, tz);
+    return parsedExplicitHour !== undefined ? zonedLocalToUtcIso(y, m, d, parsedExplicitHour, 0, 0, tz) : iso;
+  }
+
+  const parsed = Date.parse(trimmed);
+  if (Number.isNaN(parsed)) {
+    throw new Error(
+      `Invalid '${fieldName}': ${rawDate}. Accepted formats: '2026-11-22T12:00:00+08:00', '2026-11-22-12', or '2026-11-22' (optionally with 'hour' 0..23).`
+    );
+  }
+  const iso = new Date(parsed).toISOString();
+  if (parsedExplicitHour !== undefined) {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: tz,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit"
+    }).formatToParts(new Date(parsed));
+    const map: Record<string, string> = {};
+    for (const p of parts) {
+      if (p.type !== "literal") map[p.type] = p.value;
+    }
+    return zonedLocalToUtcIso(Number(map.year), Number(map.month), Number(map.day), parsedExplicitHour, 0, 0, tz);
+  }
+  return iso;
 }
 
 function validateIsoTimestamp(raw: string | undefined, fieldName: string): string | undefined {
@@ -635,7 +809,9 @@ export class ChaoxExchangeClient {
       currency?: string;
       tags?: string[];
       note?: string;
+      notes?: string;
       date?: string;
+      hour?: number | string;
       requestId?: string;
     },
     mode: "expense" | "income"
@@ -687,7 +863,11 @@ export class ChaoxExchangeClient {
       normalizedProject = match.name;
     }
 
-    const isoDate = validateIsoTimestamp(input.date, "date");
+    const isoDate = resolveSxTimestamp(input.date, "date", {
+      timeZone: catalog?.timeZoneIdentifier,
+      hour: mode === "expense" ? input.hour : undefined,
+      allowHourOnly: mode === "expense"
+    });
 
     const payload: Record<string, unknown> = {
       amount: Math.round(input.amount * 100) / 100,
@@ -697,7 +877,8 @@ export class ChaoxExchangeClient {
     if (input.tags !== undefined) {
       payload.tags = input.tags.map((tag) => tag.trim()).filter((tag) => tag.length > 0);
     }
-    if (input.note?.trim()) payload.note = input.note.trim();
+    const mergedNote = input.note ?? input.notes;
+    if (mergedNote?.trim()) payload.note = mergedNote.trim();
     if (isoDate) payload.date = isoDate;
     return payload;
   }

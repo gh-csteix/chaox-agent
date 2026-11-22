@@ -68,7 +68,7 @@ export function createChaoxMcpServer(client: ChaoxExchangeClient): McpServer {
     {
       title: "SX Ledger Catalog",
       description:
-        "Read Spending X (SX) projects, tags, rules, and default currency from sx/catalog.json. Never returns credentials or private vault data.",
+        "Read Spending X (SX) timeZoneIdentifier, summaryCurrency, supportedCurrencies, active projects (with recentExpenseTags/recentIncomeTags), tags, and rules from sx/catalog.json. Call before recording expenses or incomes. Never returns credentials or private vault data.",
       inputSchema: {},
       annotations: { readOnlyHint: true }
     },
@@ -86,16 +86,16 @@ export function createChaoxMcpServer(client: ChaoxExchangeClient): McpServer {
     {
       title: "SX Financial Summary",
       description:
-        "Read Spending X (SX) totals for today, week, month, year, or allTime in expense or income mode, including an optimistic overlay of pending sx/inbox entries.",
+        "Read Spending X (SX) net cash-flow totals converted to summaryCurrency for today, week, month, year, or allTime in expense or income mode, including committedBucket and optimisticOverlay (pending sx/inbox writes).",
       inputSchema: {
         period: z
           .enum(["today", "week", "month", "year", "allTime"])
           .optional()
-          .describe("Time window (default: month)"),
+          .describe("Aggregation window in SX's device timezone (default: 'month')"),
         mode: z
           .enum(["expense", "income"])
           .optional()
-          .describe("Cash-flow side (default: expense)")
+          .describe("Cash-flow side: 'expense' (default) or 'income'")
       },
       annotations: { readOnlyHint: true }
     },
@@ -113,28 +113,50 @@ export function createChaoxMcpServer(client: ChaoxExchangeClient): McpServer {
     {
       title: "Record SX Expense",
       description:
-        "Queue an expense write in sx/inbox for Spending X. Call sx_get_catalog first so projectName matches an active project supporting expenses. Omit tags to inherit recent project tags; pass [] to clear tags.",
+        "Queue an expense write in sx/inbox for Spending X. Call sx_get_catalog first. SX stores expenses with date + 24-hour local hour (00-23) precision, displayed as 'YYYY-MM-DD-HH' (the last 2 digits are the 24-hour local hour, NEVER minutes or a sequence number; '00' = midnight/hour unknown).",
       inputSchema: {
-        amount: z.number().positive().describe("Expense amount (> 0)"),
+        amount: z
+          .number()
+          .positive()
+          .describe("Gross original payment amount strictly > 0 before any refunds (e.g. 18.5)"),
         projectName: z
           .string()
           .min(1)
-          .describe("Existing SX project name from sx_get_catalog"),
+          .describe(
+            "Existing reusable SX project name from sx_get_catalog with supportsExpense=true (e.g. 'EatingDrinkingOut'). Put merchant/dish/item details in 'note', not as a new project."
+          ),
         currency: z
           .string()
           .optional()
-          .describe("3-letter ISO currency code, e.g. CNY or USD (defaults to project/summary currency)"),
+          .describe("Optional 3-letter ISO-4217 currency code (e.g. 'CNY', 'USD'); omit to inherit the project's currency"),
         tags: z
           .array(z.string())
           .optional()
-          .describe("Tag names to attach (omit to inherit recent project tags; pass [] to clear)"),
-        note: z.string().optional().describe("Expense description or merchant note"),
-        date: z.string().optional().describe("ISO-8601 date/time (defaults to now)"),
+          .describe("Optional tag names (OMIT to inherit the project's recentExpenseTags; pass [] to clear all tags)"),
+        note: z
+          .string()
+          .optional()
+          .describe("Optional single-line merchant/item/order memo shown below the date on SX cards"),
+        date: z
+          .string()
+          .optional()
+          .describe(
+            "Optional expense date/time: ISO-8601 with offset ('2026-11-22T12:00:00+08:00'), SX display format ('2026-11-22-12'), local ('2026-11-22 12:00'), or 'YYYY-MM-DD' (defaults to local 00:00 unless 'hour' is passed). Omit both date and hour for now."
+          ),
+        hour: z
+          .number()
+          .int()
+          .min(0)
+          .max(23)
+          .optional()
+          .describe(
+            "Optional 24-hour local clock hour (0..23) in SX's timezone — sets the trailing '-HH' in 'YYYY-MM-DD-HH' (0=midnight/unknown, 9=09:00, 12=12:00 noon, 19=19:00)"
+          ),
         requestId: z
           .string()
           .optional()
           .describe("Optional idempotency key for safe retries"),
-        client: z.string().optional().describe("Calling AI client identifier")
+        client: z.string().optional().describe("Optional calling AI client identifier")
       }
     },
     async (args) => {
@@ -151,22 +173,28 @@ export function createChaoxMcpServer(client: ChaoxExchangeClient): McpServer {
     {
       title: "Record SX Income",
       description:
-        "Queue an income write in sx/inbox for Spending X. Requires an existing projectName that supports income.",
+        "Queue an income write in sx/inbox for Spending X. Requires an existing projectName with supportsIncome=true. Incomes display at calendar-day precision ('YYYY-MM-DD').",
       inputSchema: {
-        amount: z.number().positive().describe("Income amount (> 0)"),
+        amount: z.number().positive().describe("Gross income amount strictly > 0"),
         projectName: z
           .string()
           .min(1)
-          .describe("Existing SX project name from sx_get_catalog"),
-        currency: z.string().optional().describe("3-letter ISO currency code, e.g. CNY or USD"),
+          .describe("Existing SX project name from sx_get_catalog with supportsIncome=true"),
+        currency: z
+          .string()
+          .optional()
+          .describe("Optional 3-letter ISO-4217 currency code (e.g. 'CNY', 'USD'); omit to inherit project currency"),
         tags: z
           .array(z.string())
           .optional()
-          .describe("Tag names to attach (omit to inherit recent project tags; pass [] to clear)"),
-        note: z.string().optional().describe("Income note"),
-        date: z.string().optional().describe("ISO-8601 date/time (defaults to now)"),
+          .describe("Optional tag names (omit to inherit recentIncomeTags; pass [] to clear)"),
+        note: z.string().optional().describe("Optional income memo"),
+        date: z
+          .string()
+          .optional()
+          .describe("Optional income date/time: ISO-8601 with offset or calendar date 'YYYY-MM-DD' (defaults to now)"),
         requestId: z.string().optional().describe("Optional idempotency key"),
-        client: z.string().optional().describe("Calling AI client identifier")
+        client: z.string().optional().describe("Optional calling AI client identifier")
       }
     },
     async (args) => {

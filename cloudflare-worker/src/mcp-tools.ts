@@ -48,7 +48,7 @@ export const TOOL_DEFINITIONS = [
     name: "sx_get_catalog",
     title: "SX Ledger Catalog",
     description:
-      "Read Spending X (SX) projects, tags, rules, supported currencies, and default currency. Never returns credentials or private vault data.",
+      "Read Spending X (SX) device timezone (timeZoneIdentifier), default summaryCurrency, supportedCurrencies, active projects (with currency, type, cycle, cash-flow support, and recentExpenseTags/recentIncomeTags), existing tags, rules, and fieldGuide. Call before recording expenses or incomes. Never returns credentials or private vault data.",
     annotations: { readOnlyHint: true },
     inputSchema: { type: "object", properties: {} }
   },
@@ -56,13 +56,21 @@ export const TOOL_DEFINITIONS = [
     name: "sx_get_summary",
     title: "SX Financial Summary",
     description:
-      "Read Spending X (SX) totals for today, week, month, year, or allTime in expense or income mode, including an optimistic overlay of pending inbox writes.",
+      "Read Spending X (SX) net cash-flow totals converted to summaryCurrency for today, week, month, year, or allTime in expense or income mode. Returns committedBucket (last device sync), allBuckets, and optimisticOverlay (pending inbox writes queued since last sync).",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: "object",
       properties: {
-        period: { type: "string", enum: ["today", "week", "month", "year", "allTime"] },
-        mode: { type: "string", enum: ["expense", "income"] }
+        period: {
+          type: "string",
+          enum: ["today", "week", "month", "year", "allTime"],
+          description: "Aggregation window in SX's device timezone (default: 'month')"
+        },
+        mode: {
+          type: "string",
+          enum: ["expense", "income"],
+          description: "Cash-flow side to summarize: 'expense' (default) or 'income'"
+        }
       }
     }
   },
@@ -70,17 +78,25 @@ export const TOOL_DEFINITIONS = [
     name: "sx_list_projects",
     title: "List SX Projects",
     description:
-      "List Spending X projects with pricing, cycle, cashFlowSides, record counts, and whether each project is deletable.",
+      "List Spending X projects (reusable spending/income buckets) with pricing, billing cycle, priceType, projectType, cashFlowSides, record counts, and whether each project is deletable (deletable is true only when expenseCount=0, incomeCount=0, and credentialLinkCount=0). Overlays pending inbox mutations.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: "object",
       properties: {
-        query: { type: "string" },
-        projectType: { type: "string", enum: ["nonRenewal", "autoRenew", "pausedRenew", "expired"] },
-        cashFlow: { type: "string", enum: ["expense", "income"] },
-        currency: { type: "string" },
-        limit: { type: "integer", minimum: 1, maximum: 200 },
-        offset: { type: "integer", minimum: 0 }
+        query: { type: "string", description: "Case-insensitive substring search across project name, notes, and currency" },
+        projectType: {
+          type: "string",
+          enum: ["nonRenewal", "autoRenew", "pausedRenew", "expired"],
+          description: "Filter by project lifecycle type"
+        },
+        cashFlow: {
+          type: "string",
+          enum: ["expense", "income"],
+          description: "Filter to projects supporting 'expense' or 'income'"
+        },
+        currency: { type: "string", description: "Filter by 3-letter ISO currency code (e.g. 'CNY', 'USD')" },
+        limit: { type: "integer", minimum: 1, maximum: 200, description: "Max items to return (default 50, max 200)" },
+        offset: { type: "integer", minimum: 0, description: "Zero-based pagination offset (default 0)" }
       }
     }
   },
@@ -88,21 +104,27 @@ export const TOOL_DEFINITIONS = [
     name: "sx_list_expenses",
     title: "List SX Expenses",
     description:
-      "Read Spending X expense records and their refunds (excluding all credentials/vault secrets). Use IDs returned here for update or delete.",
+      "Read Spending X expense records (sorted newest first, with pending inbox overlay and refunds, excluding vault secrets). Returned fields per item: id (integer; -1 if queued in inbox), projectId, projectName, amount (gross paid), refundTotal, netAmount (amount - refundTotal, shown as headline), currency, tags, notes (memo; note write tools use singular 'note'), paidAt (UTC ISO-8601), localDate ('YYYY-MM-DD' in timeZoneIdentifier), localHour (integer 0..23 in timeZoneIdentifier), displayDate ('YYYY-MM-DD-HH' matching SX UI — trailing 2 digits are the 24-hour local hour, NEVER minutes or a counter), isAutoRecorded (true for scheduled subscription auto-records), credentialId/credentialName (when 'credentials' scope is enabled), refunds.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: "object",
       properties: {
-        from: { type: "string", description: "Start date YYYY-MM-DD or ISO-8601" },
-        to: { type: "string", description: "End date YYYY-MM-DD or ISO-8601" },
-        projectId: { type: "integer" },
-        projectName: { type: "string" },
-        tag: { type: "string" },
-        currency: { type: "string" },
-        query: { type: "string" },
-        includeRefunds: { type: "boolean", description: "Include nested refund rows (default true)" },
-        limit: { type: "integer", minimum: 1, maximum: 200 },
-        offset: { type: "integer", minimum: 0 }
+        from: {
+          type: "string",
+          description: "Inclusive start filter: 'YYYY-MM-DD' in SX's timeZoneIdentifier (e.g. '2026-11-21'), or ISO-8601 timestamp"
+        },
+        to: {
+          type: "string",
+          description: "Inclusive end filter: 'YYYY-MM-DD' in SX's timeZoneIdentifier (e.g. '2026-11-22'), or ISO-8601 timestamp"
+        },
+        projectId: { type: "integer", description: "Exact owning project ID from sx_list_projects" },
+        projectName: { type: "string", description: "Case-insensitive substring match against projectName" },
+        tag: { type: "string", description: "Exact case-insensitive tag name filter (e.g. 'Lunch')" },
+        currency: { type: "string", description: "Exact 3-letter ISO-4217 currency filter (e.g. 'CNY', 'USD')" },
+        query: { type: "string", description: "Case-insensitive substring search across projectName, notes, and tags" },
+        includeRefunds: { type: "boolean", description: "Include nested refunds array per expense (default true)" },
+        limit: { type: "integer", minimum: 1, maximum: 200, description: "Max items to return (default 50, max 200)" },
+        offset: { type: "integer", minimum: 0, description: "Zero-based pagination offset (default 0)" }
       }
     }
   },
@@ -110,47 +132,55 @@ export const TOOL_DEFINITIONS = [
     name: "sx_list_incomes",
     title: "List SX Incomes",
     description:
-      "Read Spending X income records and their reversals (excluding all credentials/vault secrets). Use IDs returned here for update or delete.",
+      "Read Spending X income records (sorted newest first, with pending inbox overlay and reversals, excluding vault secrets). Returned fields per item: id (-1 if queued), projectId, projectName, amount (gross), reversalTotal, netAmount (amount - reversalTotal), currency, tags, notes (plural on read; write tools use 'note'), receivedAt (UTC ISO-8601), localDate ('YYYY-MM-DD' in timeZoneIdentifier — SX incomes display day precision without -HH), reversals.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: "object",
       properties: {
-        from: { type: "string" },
-        to: { type: "string" },
-        projectId: { type: "integer" },
-        projectName: { type: "string" },
-        tag: { type: "string" },
-        currency: { type: "string" },
-        query: { type: "string" },
-        includeReversals: { type: "boolean" },
-        limit: { type: "integer", minimum: 1, maximum: 200 },
-        offset: { type: "integer", minimum: 0 }
+        from: {
+          type: "string",
+          description: "Inclusive start filter: 'YYYY-MM-DD' in SX's timeZoneIdentifier, or ISO-8601 timestamp"
+        },
+        to: {
+          type: "string",
+          description: "Inclusive end filter: 'YYYY-MM-DD' in SX's timeZoneIdentifier, or ISO-8601 timestamp"
+        },
+        projectId: { type: "integer", description: "Exact owning project ID from sx_list_projects" },
+        projectName: { type: "string", description: "Case-insensitive substring match against projectName" },
+        tag: { type: "string", description: "Exact case-insensitive tag name filter" },
+        currency: { type: "string", description: "Exact 3-letter ISO-4217 currency filter (e.g. 'CNY', 'USD')" },
+        query: { type: "string", description: "Case-insensitive substring search across projectName, notes, and tags" },
+        includeReversals: { type: "boolean", description: "Include nested reversals array per income (default true)" },
+        limit: { type: "integer", minimum: 1, maximum: 200, description: "Max items to return (default 50, max 200)" },
+        offset: { type: "integer", minimum: 0, description: "Zero-based pagination offset (default 0)" }
       }
     }
   },
   {
     name: "sx_list_tags",
     title: "List SX Tags",
-    description: "List Spending X tags with expense and income record counts.",
+    description: "List Spending X tags with expense and income record usage counts (including pending inbox changes).",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: "object",
-      properties: { query: { type: "string" } }
+      properties: {
+        query: { type: "string", description: "Case-insensitive substring filter on tag name" }
+      }
     }
   },
   {
     name: "sx_list_slogans",
     title: "List SX Slogans",
-    description: "List Spending X dashboard/context slogans.",
+    description: "List Spending X dashboard/context slogans with language, ruleType, ruleValue, priority, and enabled state.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: "object",
       properties: {
-        language: { type: "string" },
-        enabledOnly: { type: "boolean" },
-        query: { type: "string" },
-        limit: { type: "integer", minimum: 1, maximum: 200 },
-        offset: { type: "integer", minimum: 0 }
+        language: { type: "string", description: "Filter by language code, e.g. 'zh-Hans' or 'en'" },
+        enabledOnly: { type: "boolean", description: "If true, return only enabled slogans" },
+        query: { type: "string", description: "Case-insensitive substring filter across text, ruleType, and ruleValue" },
+        limit: { type: "integer", minimum: 1, maximum: 200, description: "Max items to return (default 50, max 200)" },
+        offset: { type: "integer", minimum: 0, description: "Zero-based pagination offset (default 0)" }
       }
     }
   },
@@ -160,188 +190,278 @@ export const TOOL_DEFINITIONS = [
     name: "sx_record_expense",
     title: "Record SX Expense",
     description:
-      "Queue an expense creation in Spending X. Call sx_get_catalog first so projectName matches an active project supporting expenses.",
+      "Queue a new expense creation in Spending X. Call sx_get_catalog first. IMPORTANT: SX stores expenses with calendar-date + 24-hour local hour (00-23) precision, displayed in the app as 'YYYY-MM-DD-HH' (e.g. '2026-11-22-12' = 12:00 noon, '2026-11-21-00' = midnight/hour unknown — the trailing 2 digits are the HOUR, NEVER minutes or a sequence number).",
     inputSchema: {
       type: "object",
       required: ["amount", "projectName"],
       properties: {
-        amount: { type: "number", exclusiveMinimum: 0 },
-        projectName: { type: "string", minLength: 1 },
+        amount: {
+          type: "number",
+          exclusiveMinimum: 0,
+          description:
+            "Gross original payment amount strictly > 0 before any refunds (rounded to 2 decimals, e.g. 18.5; never negative — log refunds via sx_record_refund)"
+        },
+        projectName: {
+          type: "string",
+          minLength: 1,
+          description:
+            "Exact name (case-insensitive) of an active SX project from sx_get_catalog with supportsExpense=true (e.g. 'EatingDrinkingOut', 'AMAP', 'Spaceship'). A project is a reusable category/service bucket — put specific merchant, dish, or item details in 'note', not as a new project."
+        },
         credentialId: {
           type: "integer",
           minimum: 1,
-          description: "Optional linked credential ID (requires SX 'credentials' scope opt-in)"
+          description:
+            "Optional linked non-secret credential ID from sx_list_credentials (requires user opt-in to SX 'credentials' scope)"
         },
-        currency: { type: "string" },
-        tags: { type: "array", items: { type: "string" } },
-        note: { type: "string" },
-        date: { type: "string" },
-        requestId: { type: "string" },
-        client: { type: "string" }
+        currency: {
+          type: "string",
+          description:
+            "Optional 3-letter uppercase ISO-4217 currency code from sx_get_catalog.supportedCurrencies (e.g. 'CNY', 'USD'). Omit to inherit the project's default currency."
+        },
+        tags: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Optional array of tag names in pick order (prefer existing names from sx_get_catalog.tags, e.g. ['Lunch']). IMPORTANT: OMIT this field to inherit the project's recentExpenseTags; pass [] to explicitly clear all tags; pass non-empty array to set exact tags (unknown tags auto-create on device)."
+        },
+        note: {
+          type: "string",
+          description:
+            "Optional free-text memo displayed as one single truncated line under the date on SX cards (put merchant, dishes, items, route, or receipt notes here; lead with key info). Write input uses singular 'note' while read output uses plural 'notes'."
+        },
+        date: {
+          type: "string",
+          description:
+            "Optional expense date/time. Accepted formats: (1) ISO-8601 with timezone offset, e.g. '2026-11-22T12:00:00+08:00' or '...Z'; (2) SX display format 'YYYY-MM-DD-HH' in sx_get_catalog.timeZoneIdentifier, e.g. '2026-11-22-12'; (3) local 'YYYY-MM-DD HH:mm'; (4) calendar date 'YYYY-MM-DD' (pair with 'hour' 0..23 if known; without 'hour', defaults to local 00:00 = 'YYYY-MM-DD-00'). Omit both date and hour to use current time."
+        },
+        hour: {
+          type: "integer",
+          minimum: 0,
+          maximum: 23,
+          description:
+            "Optional 24-hour local clock hour (0..23) in sx_get_catalog.timeZoneIdentifier. Appears as the trailing 2 digits in SX's 'YYYY-MM-DD-HH' timestamp (0 = 00:00 / hour unknown, 9 = 09:00, 12 = 12:00 noon, 19 = 19:00). Overrides the hour when combined with 'date'; if 'date' is omitted, applies to today in SX's timezone."
+        },
+        requestId: {
+          type: "string",
+          description:
+            "Optional idempotency key so retries never create duplicates (e.g. 'meal-20261122-lunch-1'). Omit to auto-generate."
+        },
+        client: {
+          type: "string",
+          description: "Optional short calling AI assistant identifier for audit logs (e.g. 'claude', 'cursor')"
+        }
       }
     }
   },
   {
     name: "sx_update_expense",
     title: "Update SX Expense",
-    description: "Queue an update to an existing SX expense record by ID (requires Update permission).",
+    description:
+      "Queue a partial patch update to an existing SX expense record by ID (requires Update permission). Omitted fields (such as amount, currency, tags, note) remain unchanged. Multiple queued updates for the same existing id execute strictly in FIFO order on device (and overlay in order in sx_list_expenses), so you can send a follow-up update to fix date or hour immediately without waiting for the user to sync SX first. Examples: { id: 698, date: '2026-11-22', hour: 9 } or { id: 698, date: '2026-11-22-09' } or { id: 698, hour: 9 }.",
     inputSchema: {
       type: "object",
       required: ["id"],
       properties: {
-        id: { type: "integer", minimum: 1 },
-        amount: { type: "number", exclusiveMinimum: 0 },
-        projectName: { type: "string" },
-        credentialId: { type: "integer", minimum: 1, description: "Attach/change credential (requires 'credentials' scope)" },
-        clearCredential: { type: "boolean", description: "Detach existing credential from this expense" },
-        currency: { type: "string" },
-        tags: { type: "array", items: { type: "string" } },
-        note: { type: "string" },
-        date: { type: "string" },
-        requestId: { type: "string" },
-        client: { type: "string" }
+        id: { type: "integer", minimum: 1, description: "Target expense record ID from sx_list_expenses" },
+        amount: { type: "number", exclusiveMinimum: 0, description: "New gross payment amount strictly > 0" },
+        projectName: {
+          type: "string",
+          description:
+            "Move expense to another existing project supporting expenses (note: moving projects clears existing credentialId unless a new credentialId is also provided)"
+        },
+        credentialId: {
+          type: "integer",
+          minimum: 1,
+          description: "Attach or change linked credential ID (requires 'credentials' scope)"
+        },
+        clearCredential: { type: "boolean", description: "Set true to detach existing credential from this expense" },
+        currency: {
+          type: "string",
+          description: "New 3-letter ISO-4217 currency code from sx_get_catalog.supportedCurrencies (e.g. 'CNY', 'USD')"
+        },
+        tags: {
+          type: "array",
+          items: { type: "string" },
+          description: "Replacement list of tag names (omit to keep current tags; pass [] to remove all tags)"
+        },
+        note: { type: "string", description: "Replacement memo text (pass '' to clear note)" },
+        date: {
+          type: "string",
+          description:
+            "New expense date/time in ISO-8601 with offset ('2026-11-22T09:00:00+08:00'), SX format ('2026-11-22-09' or '2026-11-22 09'), local ('2026-11-22 09:00'), or 'YYYY-MM-DD' (defaults to 00:00 local unless 'hour' is passed)"
+        },
+        hour: {
+          type: "integer",
+          minimum: 0,
+          maximum: 23,
+          description:
+            "New 24-hour local hour (0..23) in SX's timezone. If 'date' is omitted, keeps the expense's existing (or latest queued) localDate from the synced snapshot and changes only its hour."
+        },
+        requestId: { type: "string", description: "Optional idempotency key for safe retries" },
+        client: { type: "string", description: "Optional calling AI assistant identifier" }
       }
     }
   },
   {
     name: "sx_delete_expense",
     title: "Delete SX Expense (Trash)",
-    description: "Move an SX expense (and its refunds) to 30-day Trash (requires Delete permission).",
+    description: "Move an SX expense (and its refunds) to 30-day recoverable Trash (requires Delete permission).",
     annotations: { destructiveHint: true },
     inputSchema: {
       type: "object",
       required: ["id"],
       properties: {
-        id: { type: "integer", minimum: 1 },
-        requestId: { type: "string" },
-        client: { type: "string" }
+        id: { type: "integer", minimum: 1, description: "Expense ID from sx_list_expenses" },
+        requestId: { type: "string", description: "Optional idempotency key" },
+        client: { type: "string", description: "Optional calling AI assistant identifier" }
       }
     }
   },
   {
     name: "sx_record_refund",
     title: "Record SX Refund",
-    description: "Add a refund against an existing SX expense paymentId.",
+    description:
+      "Add a refund against an existing SX expense paymentId. Refunds inherit the parent expense's currency and reduce netAmount.",
     inputSchema: {
       type: "object",
       required: ["paymentId", "amount"],
       properties: {
-        paymentId: { type: "integer", minimum: 1 },
-        amount: { type: "number", exclusiveMinimum: 0 },
-        note: { type: "string" },
-        date: { type: "string" },
-        requestId: { type: "string" },
-        client: { type: "string" }
+        paymentId: { type: "integer", minimum: 1, description: "Parent expense ID from sx_list_expenses" },
+        amount: { type: "number", exclusiveMinimum: 0, description: "Refund amount strictly > 0 in the parent expense's currency" },
+        note: { type: "string", description: "Optional refund memo/reason" },
+        date: { type: "string", description: "Optional refund date/time (ISO-8601, 'YYYY-MM-DD-HH', or 'YYYY-MM-DD' local)" },
+        requestId: { type: "string", description: "Optional idempotency key" },
+        client: { type: "string", description: "Optional calling AI assistant identifier" }
       }
     }
   },
   {
     name: "sx_update_refund",
     title: "Update SX Refund",
-    description: "Update an existing SX payment refund by refund ID.",
+    description: "Update an existing SX payment refund by refund ID (omitted fields remain unchanged).",
     inputSchema: {
       type: "object",
       required: ["id"],
       properties: {
-        id: { type: "integer", minimum: 1 },
-        amount: { type: "number", exclusiveMinimum: 0 },
-        note: { type: "string" },
-        date: { type: "string" },
-        requestId: { type: "string" },
-        client: { type: "string" }
+        id: { type: "integer", minimum: 1, description: "Refund ID from expense.refunds[].id in sx_list_expenses" },
+        amount: { type: "number", exclusiveMinimum: 0, description: "New positive refund amount" },
+        note: { type: "string", description: "Replacement refund memo (pass '' to clear)" },
+        date: { type: "string", description: "New refund date/time (ISO-8601 or 'YYYY-MM-DD' local)" },
+        requestId: { type: "string", description: "Optional idempotency key" },
+        client: { type: "string", description: "Optional calling AI assistant identifier" }
       }
     }
   },
   {
     name: "sx_delete_refund",
     title: "Delete SX Refund (Trash)",
-    description: "Move an SX refund to Trash by refund ID.",
+    description: "Move an SX refund to 30-day Trash by refund ID.",
     annotations: { destructiveHint: true },
     inputSchema: {
       type: "object",
       required: ["id"],
       properties: {
-        id: { type: "integer", minimum: 1 },
-        requestId: { type: "string" },
-        client: { type: "string" }
+        id: { type: "integer", minimum: 1, description: "Refund ID from expense.refunds[].id" },
+        requestId: { type: "string", description: "Optional idempotency key" },
+        client: { type: "string", description: "Optional calling AI assistant identifier" }
       }
     }
   },
   {
     name: "sx_record_income",
     title: "Record SX Income",
-    description: "Queue an income creation in Spending X. Requires an active projectName supporting income.",
+    description:
+      "Queue an income creation in Spending X. Call sx_get_catalog first so projectName matches an active project with supportsIncome=true. Incomes display at calendar-day precision ('YYYY-MM-DD').",
     inputSchema: {
       type: "object",
       required: ["amount", "projectName"],
       properties: {
-        amount: { type: "number", exclusiveMinimum: 0 },
-        projectName: { type: "string", minLength: 1 },
+        amount: { type: "number", exclusiveMinimum: 0, description: "Gross income amount strictly > 0 (before any reversals)" },
+        projectName: {
+          type: "string",
+          minLength: 1,
+          description: "Exact name (case-insensitive) of an SX project from sx_get_catalog with supportsIncome=true"
+        },
         credentialId: {
           type: "integer",
           minimum: 1,
-          description: "Optional linked credential ID (requires SX 'credentials' scope opt-in)"
+          description: "Optional linked credential ID from sx_list_credentials (requires SX 'credentials' scope opt-in)"
         },
-        currency: { type: "string" },
-        tags: { type: "array", items: { type: "string" } },
-        note: { type: "string" },
-        date: { type: "string" },
-        requestId: { type: "string" },
-        client: { type: "string" }
+        currency: {
+          type: "string",
+          description: "Optional 3-letter ISO-4217 currency code (e.g. 'CNY', 'USD'); omit to inherit the project's default currency"
+        },
+        tags: {
+          type: "array",
+          items: { type: "string" },
+          description: "Optional tag names (omit to inherit recentIncomeTags; pass [] to clear all tags)"
+        },
+        note: { type: "string", description: "Optional income memo (source, payer, invoice/period note)" },
+        date: {
+          type: "string",
+          description: "Optional income date/time: ISO-8601 with offset, or calendar date 'YYYY-MM-DD' in SX's timeZoneIdentifier (defaults to now)"
+        },
+        requestId: { type: "string", description: "Optional idempotency key for safe retries" },
+        client: { type: "string", description: "Optional calling AI assistant identifier" }
       }
     }
   },
   {
     name: "sx_update_income",
     title: "Update SX Income",
-    description: "Update an existing SX income record by ID.",
+    description:
+      "Queue a partial patch update to an existing SX income record by ID (omitted fields remain unchanged; sequential queued updates execute in FIFO order on device).",
     inputSchema: {
       type: "object",
       required: ["id"],
       properties: {
-        id: { type: "integer", minimum: 1 },
-        amount: { type: "number", exclusiveMinimum: 0 },
-        projectName: { type: "string" },
-        credentialId: { type: "integer", minimum: 1, description: "Attach/change credential (requires 'credentials' scope)" },
-        clearCredential: { type: "boolean", description: "Detach existing credential from this income" },
-        currency: { type: "string" },
-        tags: { type: "array", items: { type: "string" } },
-        note: { type: "string" },
-        date: { type: "string" },
-        requestId: { type: "string" },
-        client: { type: "string" }
+        id: { type: "integer", minimum: 1, description: "Income record ID from sx_list_incomes" },
+        amount: { type: "number", exclusiveMinimum: 0, description: "New positive gross income amount" },
+        projectName: { type: "string", description: "Move income to another existing project supporting income" },
+        credentialId: { type: "integer", minimum: 1, description: "Attach/change credential ID (requires 'credentials' scope)" },
+        clearCredential: { type: "boolean", description: "Set true to detach existing credential from this income" },
+        currency: { type: "string", description: "New 3-letter ISO-4217 currency code" },
+        tags: {
+          type: "array",
+          items: { type: "string" },
+          description: "Replacement tag names (omit to keep current tags; pass [] to clear)"
+        },
+        note: { type: "string", description: "Replacement income memo" },
+        date: { type: "string", description: "New income date/time (ISO-8601 with offset or 'YYYY-MM-DD' local)" },
+        requestId: { type: "string", description: "Optional idempotency key" },
+        client: { type: "string", description: "Optional calling AI assistant identifier" }
       }
     }
   },
   {
     name: "sx_delete_income",
     title: "Delete SX Income (Trash)",
-    description: "Move an SX income record (and its reversals) to Trash by ID.",
+    description: "Move an SX income record (and its reversals) to 30-day Trash by ID.",
     annotations: { destructiveHint: true },
     inputSchema: {
       type: "object",
       required: ["id"],
       properties: {
-        id: { type: "integer", minimum: 1 },
-        requestId: { type: "string" },
-        client: { type: "string" }
+        id: { type: "integer", minimum: 1, description: "Income record ID from sx_list_incomes" },
+        requestId: { type: "string", description: "Optional idempotency key" },
+        client: { type: "string", description: "Optional calling AI assistant identifier" }
       }
     }
   },
   {
     name: "sx_record_income_reversal",
     title: "Record SX Income Reversal",
-    description: "Add a reversal against an existing SX income record.",
+    description: "Add a reversal/clawback against an existing SX income record (reduces netAmount).",
     inputSchema: {
       type: "object",
       required: ["incomeId", "amount"],
       properties: {
-        incomeId: { type: "integer", minimum: 1 },
-        amount: { type: "number", exclusiveMinimum: 0 },
-        note: { type: "string" },
-        date: { type: "string" },
-        requestId: { type: "string" },
-        client: { type: "string" }
+        incomeId: { type: "integer", minimum: 1, description: "Parent income ID from sx_list_incomes" },
+        amount: { type: "number", exclusiveMinimum: 0, description: "Positive reversal amount in parent income's currency" },
+        note: { type: "string", description: "Optional reversal memo" },
+        date: { type: "string", description: "Optional reversal date (ISO-8601 or 'YYYY-MM-DD' local)" },
+        requestId: { type: "string", description: "Optional idempotency key" },
+        client: { type: "string", description: "Optional calling AI assistant identifier" }
       }
     }
   },
@@ -353,73 +473,103 @@ export const TOOL_DEFINITIONS = [
       type: "object",
       required: ["id"],
       properties: {
-        id: { type: "integer", minimum: 1 },
-        amount: { type: "number", exclusiveMinimum: 0 },
-        note: { type: "string" },
-        date: { type: "string" },
-        requestId: { type: "string" },
-        client: { type: "string" }
+        id: { type: "integer", minimum: 1, description: "Reversal ID from income.reversals[].id" },
+        amount: { type: "number", exclusiveMinimum: 0, description: "New positive reversal amount" },
+        note: { type: "string", description: "Replacement reversal memo" },
+        date: { type: "string", description: "New reversal date (ISO-8601 or 'YYYY-MM-DD' local)" },
+        requestId: { type: "string", description: "Optional idempotency key" },
+        client: { type: "string", description: "Optional calling AI assistant identifier" }
       }
     }
   },
   {
     name: "sx_delete_income_reversal",
     title: "Delete SX Income Reversal (Trash)",
-    description: "Move an SX income reversal to Trash by ID.",
+    description: "Move an SX income reversal to 30-day Trash by ID.",
     annotations: { destructiveHint: true },
     inputSchema: {
       type: "object",
       required: ["id"],
       properties: {
-        id: { type: "integer", minimum: 1 },
-        requestId: { type: "string" },
-        client: { type: "string" }
+        id: { type: "integer", minimum: 1, description: "Reversal ID from income.reversals[].id" },
+        requestId: { type: "string", description: "Optional idempotency key" },
+        client: { type: "string", description: "Optional calling AI assistant identifier" }
       }
     }
   },
   {
     name: "sx_create_project",
     title: "Create SX Project",
-    description: "Create a new Spending X project.",
+    description:
+      "Create a new Spending X project (reusable spending/income category or subscription). Check sx_get_catalog first — never create duplicate projects or one-off projects for individual purchases.",
     inputSchema: {
       type: "object",
       required: ["name"],
       properties: {
-        name: { type: "string", minLength: 1 },
-        price: { type: "number", minimum: 0 },
-        currency: { type: "string" },
-        cycle: { type: "string", enum: ["daily", "weekly", "monthly", "quarterly", "yearly", "irregular"] },
-        priceType: { type: "string", enum: ["fixed", "floating"] },
-        projectType: { type: "string", enum: ["nonRenewal", "autoRenew", "pausedRenew", "expired"] },
-        cashFlowSides: { type: "string", enum: ["expenseOnly", "incomeOnly", "both"] },
-        startDate: { type: "string" },
-        endDate: { type: "string" },
-        isAutoRenew: { type: "boolean" },
-        notes: { type: "string" },
-        requestId: { type: "string" },
-        client: { type: "string" }
+        name: { type: "string", minLength: 1, description: "Unique project name (case-insensitive across live projects)" },
+        price: { type: "number", minimum: 0, description: "Listed/recurring price >= 0 (default 0 for floating/irregular categories)" },
+        currency: { type: "string", description: "3-letter ISO-4217 currency code (defaults to SX summaryCurrency)" },
+        cycle: {
+          type: "string",
+          enum: ["daily", "weekly", "monthly", "quarterly", "yearly", "irregular"],
+          description: "Billing/occurrence cadence (default: 'irregular')"
+        },
+        priceType: {
+          type: "string",
+          enum: ["fixed", "floating"],
+          description: "'fixed' for fixed-price subscriptions or 'floating' for variable spending (default: 'floating')"
+        },
+        projectType: {
+          type: "string",
+          enum: ["nonRenewal", "autoRenew", "pausedRenew", "expired"],
+          description:
+            "Lifecycle mode: 'nonRenewal' one-off/ad-hoc (default), 'autoRenew' active subscription, 'pausedRenew' paused subscription, 'expired' ended"
+        },
+        cashFlowSides: {
+          type: "string",
+          enum: ["expenseOnly", "incomeOnly", "both"],
+          description: "Allowed record sides: 'expenseOnly' (default), 'incomeOnly', or 'both'"
+        },
+        startDate: { type: "string", description: "Optional project start date (ISO-8601 or 'YYYY-MM-DD' local; defaults to now)" },
+        endDate: { type: "string", description: "Optional project end/expiry date (ISO-8601 or 'YYYY-MM-DD' local)" },
+        isAutoRenew: { type: "boolean", description: "Whether auto-renewal is enabled (defaults to true only when projectType='autoRenew')" },
+        notes: { type: "string", description: "Optional project description/notes (note: project uses 'notes' plural)" },
+        requestId: { type: "string", description: "Optional idempotency key" },
+        client: { type: "string", description: "Optional calling AI assistant identifier" }
       }
     }
   },
   {
     name: "sx_update_project",
     title: "Update SX Project",
-    description: "Update an existing Spending X project by ID.",
+    description: "Update an existing Spending X project by ID (omitted fields remain unchanged).",
     inputSchema: {
       type: "object",
       required: ["id"],
       properties: {
-        id: { type: "integer", minimum: 1 },
-        name: { type: "string" },
-        price: { type: "number", minimum: 0 },
-        currency: { type: "string" },
-        cycle: { type: "string", enum: ["daily", "weekly", "monthly", "quarterly", "yearly", "irregular"] },
-        priceType: { type: "string", enum: ["fixed", "floating"] },
-        projectType: { type: "string", enum: ["nonRenewal", "autoRenew", "pausedRenew", "expired"] },
-        cashFlowSides: { type: "string", enum: ["expenseOnly", "incomeOnly", "both"] },
-        notes: { type: "string" },
-        requestId: { type: "string" },
-        client: { type: "string" }
+        id: { type: "integer", minimum: 1, description: "Project ID from sx_list_projects" },
+        name: { type: "string", description: "New unique project name" },
+        price: { type: "number", minimum: 0, description: "New listed price >= 0" },
+        currency: { type: "string", description: "New default 3-letter ISO-4217 currency code" },
+        cycle: {
+          type: "string",
+          enum: ["daily", "weekly", "monthly", "quarterly", "yearly", "irregular"],
+          description: "New billing cadence"
+        },
+        priceType: { type: "string", enum: ["fixed", "floating"], description: "'fixed' or 'floating'" },
+        projectType: {
+          type: "string",
+          enum: ["nonRenewal", "autoRenew", "pausedRenew", "expired"],
+          description: "New lifecycle mode"
+        },
+        cashFlowSides: {
+          type: "string",
+          enum: ["expenseOnly", "incomeOnly", "both"],
+          description: "Allowed cash-flow sides"
+        },
+        notes: { type: "string", description: "Replacement project notes" },
+        requestId: { type: "string", description: "Optional idempotency key" },
+        client: { type: "string", description: "Optional calling AI assistant identifier" }
       }
     }
   },
@@ -427,15 +577,15 @@ export const TOOL_DEFINITIONS = [
     name: "sx_delete_project",
     title: "Delete SX Project (Trash)",
     description:
-      "Move an empty Spending X project (0 expenses, 0 income records, 0 credential links) to Trash.",
+      "Move an empty Spending X project (0 expenses, 0 income records, 0 credential links) to 30-day Trash.",
     annotations: { destructiveHint: true },
     inputSchema: {
       type: "object",
       required: ["id"],
       properties: {
-        id: { type: "integer", minimum: 1 },
-        requestId: { type: "string" },
-        client: { type: "string" }
+        id: { type: "integer", minimum: 1, description: "Project ID from sx_list_projects" },
+        requestId: { type: "string", description: "Optional idempotency key" },
+        client: { type: "string", description: "Optional calling AI assistant identifier" }
       }
     }
   },
@@ -447,9 +597,9 @@ export const TOOL_DEFINITIONS = [
       type: "object",
       required: ["name"],
       properties: {
-        name: { type: "string", minLength: 1 },
-        requestId: { type: "string" },
-        client: { type: "string" }
+        name: { type: "string", minLength: 1, description: "Unique tag name (case-insensitive)" },
+        requestId: { type: "string", description: "Optional idempotency key" },
+        client: { type: "string", description: "Optional calling AI assistant identifier" }
       }
     }
   },
@@ -461,81 +611,91 @@ export const TOOL_DEFINITIONS = [
       type: "object",
       required: ["id", "name"],
       properties: {
-        id: { type: "integer", minimum: 1 },
-        name: { type: "string", minLength: 1 },
-        requestId: { type: "string" },
-        client: { type: "string" }
+        id: { type: "integer", minimum: 1, description: "Tag ID from sx_list_tags" },
+        name: { type: "string", minLength: 1, description: "New tag name" },
+        requestId: { type: "string", description: "Optional idempotency key" },
+        client: { type: "string", description: "Optional calling AI assistant identifier" }
       }
     }
   },
   {
     name: "sx_delete_tag",
     title: "Delete SX Tag (Trash)",
-    description: "Move an SX tag to Trash by ID.",
+    description: "Move an SX tag to 30-day Trash by ID.",
     annotations: { destructiveHint: true },
     inputSchema: {
       type: "object",
       required: ["id"],
       properties: {
-        id: { type: "integer", minimum: 1 },
-        requestId: { type: "string" },
-        client: { type: "string" }
+        id: { type: "integer", minimum: 1, description: "Tag ID from sx_list_tags" },
+        requestId: { type: "string", description: "Optional idempotency key" },
+        client: { type: "string", description: "Optional calling AI assistant identifier" }
       }
     }
   },
   {
     name: "sx_create_slogan",
     title: "Create SX Slogan",
-    description: "Create a slogan in Spending X.",
+    description: "Create a contextual slogan shown on the Spending X Dashboard.",
     inputSchema: {
       type: "object",
       required: ["text"],
       properties: {
-        text: { type: "string", minLength: 1 },
-        language: { type: "string", description: "zh-Hans or en" },
-        emoji: { type: "string" },
-        ruleType: { type: "string" },
-        ruleValue: { type: "string" },
-        priority: { type: "integer" },
-        isEnabled: { type: "boolean" },
-        requestId: { type: "string" },
-        client: { type: "string" }
+        text: { type: "string", minLength: 1, description: "Slogan display copy" },
+        language: { type: "string", description: "Slogan language code: 'zh-Hans' (default) or 'en'" },
+        emoji: { type: "string", description: "Optional leading emoji glyph" },
+        ruleType: {
+          type: "string",
+          description:
+            "Display rule: 'always' (default), 'default', 'time_of_day', 'solar_term', 'date_specific', or 'holiday'"
+        },
+        ruleValue: {
+          type: "string",
+          description: "Rule parameter (e.g. 'MM-DD' for date_specific, hour/window key for time_of_day, or '' for always)"
+        },
+        priority: { type: "integer", description: "Higher integer takes precedence when multiple rules match (default 0)" },
+        isEnabled: { type: "boolean", description: "Whether slogan is active (default true)" },
+        requestId: { type: "string", description: "Optional idempotency key" },
+        client: { type: "string", description: "Optional calling AI assistant identifier" }
       }
     }
   },
   {
     name: "sx_update_slogan",
     title: "Update SX Slogan",
-    description: "Update an existing SX slogan by ID.",
+    description: "Update an existing SX slogan by ID (omitted fields remain unchanged).",
     inputSchema: {
       type: "object",
       required: ["id"],
       properties: {
-        id: { type: "integer", minimum: 1 },
-        text: { type: "string" },
-        language: { type: "string" },
-        emoji: { type: ["string", "null"] },
-        ruleType: { type: "string" },
-        ruleValue: { type: "string" },
-        priority: { type: "integer" },
-        isEnabled: { type: "boolean" },
-        requestId: { type: "string" },
-        client: { type: "string" }
+        id: { type: "integer", minimum: 1, description: "Slogan ID from sx_list_slogans" },
+        text: { type: "string", description: "Replacement slogan text" },
+        language: { type: "string", description: "Language code ('zh-Hans' or 'en')" },
+        emoji: { type: ["string", "null"], description: "Emoji glyph, or null to clear" },
+        ruleType: {
+          type: "string",
+          description: "'always', 'default', 'time_of_day', 'solar_term', 'date_specific', or 'holiday'"
+        },
+        ruleValue: { type: "string", description: "Rule parameter matching ruleType" },
+        priority: { type: "integer", description: "Sort/selection priority integer" },
+        isEnabled: { type: "boolean", description: "Enable or disable this slogan" },
+        requestId: { type: "string", description: "Optional idempotency key" },
+        client: { type: "string", description: "Optional calling AI assistant identifier" }
       }
     }
   },
   {
     name: "sx_delete_slogan",
     title: "Delete SX Slogan (Trash)",
-    description: "Move an SX slogan to Trash by ID.",
+    description: "Move an SX slogan to 30-day Trash by ID.",
     annotations: { destructiveHint: true },
     inputSchema: {
       type: "object",
       required: ["id"],
       properties: {
-        id: { type: "integer", minimum: 1 },
-        requestId: { type: "string" },
-        client: { type: "string" }
+        id: { type: "integer", minimum: 1, description: "Slogan ID from sx_list_slogans" },
+        requestId: { type: "string", description: "Optional idempotency key" },
+        client: { type: "string", description: "Optional calling AI assistant identifier" }
       }
     }
   },
@@ -543,16 +703,16 @@ export const TOOL_DEFINITIONS = [
     name: "sx_list_credentials",
     title: "List SX Credentials (Non-Secret Metadata & Links)",
     description:
-      "List Spending X credential metadata (username, website, type, issuer) and project link/renewal schedules when 'credentials' scope is enabled. Never returns passwords, TOTP secrets, recovery codes, or private notes.",
+      "List Spending X non-secret credential metadata (id, username, website, type, issuer) and project link/renewal schedules when 'credentials' scope is enabled. Never returns passwords, TOTP secrets, recovery codes, or private notes.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: "object",
       properties: {
-        query: { type: "string" },
-        type: { type: "string" },
-        projectId: { type: "integer", minimum: 1 },
-        limit: { type: "integer", minimum: 1, maximum: 200 },
-        offset: { type: "integer", minimum: 0 }
+        query: { type: "string", description: "Case-insensitive substring search across username, website, type, and issuer" },
+        type: { type: "string", description: "Exact case-insensitive credential type filter (e.g. 'Login')" },
+        projectId: { type: "integer", minimum: 1, description: "Filter to credentials linked to this projectId" },
+        limit: { type: "integer", minimum: 1, maximum: 200, description: "Max items to return (default 50, max 200)" },
+        offset: { type: "integer", minimum: 0, description: "Zero-based pagination offset (default 0)" }
       }
     }
   },
@@ -560,29 +720,40 @@ export const TOOL_DEFINITIONS = [
     name: "sx_create_credential",
     title: "Create SX Credential Metadata",
     description:
-      "Create a non-secret Spending X credential entry (and optionally link it to a project). Does not set passwords, TOTP, recovery codes, or notes.",
+      "Create a non-secret Spending X credential entry (and optionally link it to a project). Does not set passwords, TOTP, recovery codes, or private notes.",
     inputSchema: {
       type: "object",
       required: ["username"],
       properties: {
-        username: { type: "string", minLength: 1 },
-        website: { type: "string" },
-        type: { type: "string" },
-        issuer: { type: "string" },
-        projectId: { type: "integer", minimum: 1 },
+        username: { type: "string", minLength: 1, description: "Account login/email/identifier displayed on credential chips" },
+        website: { type: "string", description: "Optional service domain or URL (e.g. 'spaceship.com')" },
+        type: { type: "string", description: "Optional credential category label (e.g. 'Login', 'Card', 'API Key')" },
+        issuer: { type: "string", description: "Optional provider or issuer name" },
+        projectId: { type: "integer", minimum: 1, description: "Optional existing project ID to link (provide projectId or projectName, not both)" },
         projectName: {
           type: "string",
           description: "Optional project name to link (works even when the project was just queued in the same sync batch)"
         },
-        isAutoRenew: { type: "boolean" },
-        startDate: { type: "string" },
-        hasStartDate: { type: "boolean" },
-        endDate: { type: "string" },
-        nextRenewalDate: { type: "string" },
-        renewalHour: { type: "integer", minimum: 0, maximum: 23 },
-        renewalWeekdays: { type: "integer", minimum: 1, maximum: 127 },
-        requestId: { type: "string" },
-        client: { type: "string" }
+        isAutoRenew: { type: "boolean", description: "Enable auto-renewal tracking on the project-credential link" },
+        startDate: { type: "string", description: "Link start/subscription start date (ISO-8601 or 'YYYY-MM-DD' local)" },
+        hasStartDate: { type: "boolean", description: "Explicitly show start date (auto-enabled when startDate or isAutoRenew is true)" },
+        endDate: { type: "string", description: "Optional expiration/end date (ISO-8601 or 'YYYY-MM-DD' local)" },
+        nextRenewalDate: { type: "string", description: "Optional next renewal date (ISO-8601 or 'YYYY-MM-DD' local)" },
+        renewalHour: {
+          type: "integer",
+          minimum: 0,
+          maximum: 23,
+          description: "24-hour local hour (0..23) when auto-recorded renewal expenses are timestamped (default 0)"
+        },
+        renewalWeekdays: {
+          type: "integer",
+          minimum: 1,
+          maximum: 127,
+          description:
+            "7-bit weekday bitmask for daily schedules: Sun=1, Mon=2, Tue=4, Wed=8, Thu=16, Fri=32, Sat=64 (127=every day, 62=Mon-Fri, 65=weekend)"
+        },
+        requestId: { type: "string", description: "Optional idempotency key" },
+        client: { type: "string", description: "Optional calling AI assistant identifier" }
       }
     }
   },
@@ -595,13 +766,13 @@ export const TOOL_DEFINITIONS = [
       type: "object",
       required: ["id"],
       properties: {
-        id: { type: "integer", minimum: 1 },
-        username: { type: "string" },
-        website: { type: "string" },
-        type: { type: "string" },
-        issuer: { type: "string" },
-        requestId: { type: "string" },
-        client: { type: "string" }
+        id: { type: "integer", minimum: 1, description: "Credential ID from sx_list_credentials" },
+        username: { type: "string", description: "Replacement account/login identifier" },
+        website: { type: "string", description: "Replacement website/URL" },
+        type: { type: "string", description: "Replacement credential category label" },
+        issuer: { type: "string", description: "Replacement provider/issuer name" },
+        requestId: { type: "string", description: "Optional idempotency key" },
+        client: { type: "string", description: "Optional calling AI assistant identifier" }
       }
     }
   },
@@ -614,9 +785,9 @@ export const TOOL_DEFINITIONS = [
       type: "object",
       required: ["id"],
       properties: {
-        id: { type: "integer", minimum: 1 },
-        requestId: { type: "string" },
-        client: { type: "string" }
+        id: { type: "integer", minimum: 1, description: "Credential ID from sx_list_credentials" },
+        requestId: { type: "string", description: "Optional idempotency key" },
+        client: { type: "string", description: "Optional calling AI assistant identifier" }
       }
     }
   },
@@ -628,17 +799,28 @@ export const TOOL_DEFINITIONS = [
       type: "object",
       required: ["credentialId", "projectId"],
       properties: {
-        credentialId: { type: "integer", minimum: 1 },
-        projectId: { type: "integer", minimum: 1 },
-        isAutoRenew: { type: "boolean" },
-        startDate: { type: "string" },
-        hasStartDate: { type: "boolean" },
-        endDate: { type: "string" },
-        nextRenewalDate: { type: "string" },
-        renewalHour: { type: "integer", minimum: 0, maximum: 23 },
-        renewalWeekdays: { type: "integer", minimum: 1, maximum: 127 },
-        requestId: { type: "string" },
-        client: { type: "string" }
+        credentialId: { type: "integer", minimum: 1, description: "Credential ID from sx_list_credentials" },
+        projectId: { type: "integer", minimum: 1, description: "Project ID from sx_list_projects" },
+        isAutoRenew: { type: "boolean", description: "Enable auto-renewal tracking on this link" },
+        startDate: { type: "string", description: "Link start date (ISO-8601 or 'YYYY-MM-DD' local)" },
+        hasStartDate: { type: "boolean", description: "Whether startDate is active" },
+        endDate: { type: "string", description: "Optional expiration date (ISO-8601 or 'YYYY-MM-DD' local)" },
+        nextRenewalDate: { type: "string", description: "Optional next renewal date (ISO-8601 or 'YYYY-MM-DD' local)" },
+        renewalHour: {
+          type: "integer",
+          minimum: 0,
+          maximum: 23,
+          description: "24-hour local hour (0..23) for auto-recorded renewal expenses (default 0)"
+        },
+        renewalWeekdays: {
+          type: "integer",
+          minimum: 1,
+          maximum: 127,
+          description:
+            "7-bit weekday bitmask for daily schedules: Sun=1, Mon=2, Tue=4, Wed=8, Thu=16, Fri=32, Sat=64 (127=every day)"
+        },
+        requestId: { type: "string", description: "Optional idempotency key" },
+        client: { type: "string", description: "Optional calling AI assistant identifier" }
       }
     }
   },
@@ -650,19 +832,30 @@ export const TOOL_DEFINITIONS = [
       type: "object",
       required: ["credentialId", "projectId"],
       properties: {
-        credentialId: { type: "integer", minimum: 1 },
-        projectId: { type: "integer", minimum: 1 },
-        isAutoRenew: { type: "boolean" },
-        startDate: { type: "string" },
-        hasStartDate: { type: "boolean" },
-        endDate: { type: "string" },
-        clearEndDate: { type: "boolean" },
-        nextRenewalDate: { type: "string" },
-        clearNextRenewalDate: { type: "boolean" },
-        renewalHour: { type: "integer", minimum: 0, maximum: 23 },
-        renewalWeekdays: { type: "integer", minimum: 1, maximum: 127 },
-        requestId: { type: "string" },
-        client: { type: "string" }
+        credentialId: { type: "integer", minimum: 1, description: "Linked credential ID" },
+        projectId: { type: "integer", minimum: 1, description: "Linked project ID" },
+        isAutoRenew: { type: "boolean", description: "Enable or pause auto-renewal on this link" },
+        startDate: { type: "string", description: "New start date (ISO-8601 or 'YYYY-MM-DD' local)" },
+        hasStartDate: { type: "boolean", description: "Whether startDate is shown" },
+        endDate: { type: "string", description: "New expiration date (ISO-8601 or 'YYYY-MM-DD' local)" },
+        clearEndDate: { type: "boolean", description: "Set true to remove endDate" },
+        nextRenewalDate: { type: "string", description: "New next renewal date (ISO-8601 or 'YYYY-MM-DD' local)" },
+        clearNextRenewalDate: { type: "boolean", description: "Set true to clear nextRenewalDate" },
+        renewalHour: {
+          type: "integer",
+          minimum: 0,
+          maximum: 23,
+          description: "24-hour local hour (0..23) for auto-recorded renewal expenses"
+        },
+        renewalWeekdays: {
+          type: "integer",
+          minimum: 1,
+          maximum: 127,
+          description:
+            "7-bit weekday bitmask for daily schedules: Sun=1, Mon=2, Tue=4, Wed=8, Thu=16, Fri=32, Sat=64 (127=every day)"
+        },
+        requestId: { type: "string", description: "Optional idempotency key" },
+        client: { type: "string", description: "Optional calling AI assistant identifier" }
       }
     }
   },
@@ -675,10 +868,10 @@ export const TOOL_DEFINITIONS = [
       type: "object",
       required: ["credentialId", "projectId"],
       properties: {
-        credentialId: { type: "integer", minimum: 1 },
-        projectId: { type: "integer", minimum: 1 },
-        requestId: { type: "string" },
-        client: { type: "string" }
+        credentialId: { type: "integer", minimum: 1, description: "Linked credential ID" },
+        projectId: { type: "integer", minimum: 1, description: "Linked project ID" },
+        requestId: { type: "string", description: "Optional idempotency key" },
+        client: { type: "string", description: "Optional calling AI assistant identifier" }
       }
     }
   },
@@ -722,11 +915,11 @@ export const TOOL_DEFINITIONS = [
     inputSchema: {
       type: "object",
       properties: {
-        from: { type: "string" },
-        to: { type: "string" },
-        activityType: { type: "string" },
-        exerciseQuery: { type: "string" },
-        equipment: { type: "string" },
+        from: { type: "string", description: "Inclusive local start date YYYY-MM-DD or ISO-8601" },
+        to: { type: "string", description: "Inclusive local end date YYYY-MM-DD or ISO-8601" },
+        activityType: { type: "string", description: "Filter by effective activity type name" },
+        exerciseQuery: { type: "string", description: "Filter workouts containing a matching exercise name or key" },
+        equipment: { type: "string", description: "Filter workouts containing a matching equipment key" },
         limit: { type: "integer", minimum: 1, maximum: 200 },
         offset: { type: "integer", minimum: 0 }
       }
@@ -756,10 +949,10 @@ export const TOOL_DEFINITIONS = [
     inputSchema: {
       type: "object",
       properties: {
-        from: { type: "string" },
-        to: { type: "string" },
+        from: { type: "string", description: "Inclusive local start date YYYY-MM-DD or ISO-8601" },
+        to: { type: "string", description: "Inclusive local end date YYYY-MM-DD or ISO-8601" },
         mealType: { type: "string", enum: ["breakfast", "lunch", "dinner", "snack"] },
-        query: { type: "string" },
+        query: { type: "string", description: "Substring search on meal name" },
         limit: { type: "integer", minimum: 1, maximum: 200 },
         offset: { type: "integer", minimum: 0 }
       }
@@ -774,10 +967,10 @@ export const TOOL_DEFINITIONS = [
     inputSchema: {
       type: "object",
       properties: {
-        from: { type: "string" },
-        to: { type: "string" },
+        from: { type: "string", description: "Inclusive local start date YYYY-MM-DD or ISO-8601" },
+        to: { type: "string", description: "Inclusive local end date YYYY-MM-DD or ISO-8601" },
         product: { type: "string", enum: ["sunscreen", "moisturizer", "bodyLotion", "medicine", "other"] },
-        query: { type: "string" },
+        query: { type: "string", description: "Substring search on product/name" },
         limit: { type: "integer", minimum: 1, maximum: 200 },
         offset: { type: "integer", minimum: 0 }
       }
@@ -791,11 +984,11 @@ export const TOOL_DEFINITIONS = [
     inputSchema: {
       type: "object",
       properties: {
-        from: { type: "string" },
-        to: { type: "string" },
+        from: { type: "string", description: "Inclusive local start date YYYY-MM-DD or ISO-8601" },
+        to: { type: "string", description: "Inclusive local end date YYYY-MM-DD or ISO-8601" },
         kind: { type: "string", enum: ["bowel", "urination"] },
         stoolType: { type: "integer", minimum: 1, maximum: 7 },
-        query: { type: "string" },
+        query: { type: "string", description: "Substring search on note" },
         limit: { type: "integer", minimum: 1, maximum: 200 },
         offset: { type: "integer", minimum: 0 }
       }
@@ -811,12 +1004,12 @@ export const TOOL_DEFINITIONS = [
       type: "object",
       required: ["name"],
       properties: {
-        name: { type: "string", minLength: 1 },
-        mealType: { type: "string", enum: ["breakfast", "lunch", "dinner", "snack"] },
-        calories: { type: "number", minimum: 0 },
-        recordedAt: { type: "string" },
-        requestId: { type: "string" },
-        client: { type: "string" }
+        name: { type: "string", minLength: 1, description: "Food or meal description" },
+        mealType: { type: "string", enum: ["breakfast", "lunch", "dinner", "snack"], description: "Meal slot (inferred from recordedAt on device if omitted)" },
+        calories: { type: "number", minimum: 0, description: "Estimated or exact kilocalories (>= 0, optional)" },
+        recordedAt: { type: "string", description: "ISO-8601 timestamp with timezone offset (e.g. '2026-11-22T12:00:00+08:00'); defaults to now" },
+        requestId: { type: "string", description: "Optional idempotency key" },
+        client: { type: "string", description: "Optional calling AI assistant identifier" }
       }
     }
   },
@@ -833,7 +1026,7 @@ export const TOOL_DEFINITIONS = [
         mealType: { type: "string", enum: ["breakfast", "lunch", "dinner", "snack"] },
         calories: { type: "number", exclusiveMinimum: 0 },
         clearCalories: { type: "boolean" },
-        recordedAt: { type: "string" },
+        recordedAt: { type: "string", description: "Replacement ISO-8601 timestamp with timezone offset" },
         requestId: { type: "string" },
         client: { type: "string" }
       }
@@ -863,9 +1056,9 @@ export const TOOL_DEFINITIONS = [
       required: ["product"],
       properties: {
         product: { type: "string", enum: ["sunscreen", "moisturizer", "bodyLotion", "medicine", "other"] },
-        name: { type: "string" },
-        brand: { type: "string" },
-        recordedAt: { type: "string" },
+        name: { type: "string", description: "Optional product or medication name" },
+        brand: { type: "string", description: "Alias for name if no separate product label" },
+        recordedAt: { type: "string", description: "ISO-8601 timestamp with timezone offset (defaults to now)" },
         requestId: { type: "string" },
         client: { type: "string" }
       }
@@ -882,7 +1075,7 @@ export const TOOL_DEFINITIONS = [
         id: { type: "string", minLength: 1 },
         product: { type: "string", enum: ["sunscreen", "moisturizer", "bodyLotion", "medicine", "other"] },
         name: { type: "string" },
-        recordedAt: { type: "string" },
+        recordedAt: { type: "string", description: "Replacement ISO-8601 timestamp with timezone offset" },
         requestId: { type: "string" },
         client: { type: "string" }
       }
@@ -910,11 +1103,11 @@ export const TOOL_DEFINITIONS = [
     inputSchema: {
       type: "object",
       properties: {
-        kind: { type: "string", enum: ["bowel", "urination"] },
-        stoolType: { type: "integer", minimum: 1, maximum: 7 },
-        bristol: { type: "integer", minimum: 1, maximum: 7 },
+        kind: { type: "string", enum: ["bowel", "urination"], description: "Event kind (default: 'bowel')" },
+        stoolType: { type: "integer", minimum: 1, maximum: 7, description: "Bristol stool scale 1..7 (required for bowel)" },
+        bristol: { type: "integer", minimum: 1, maximum: 7, description: "Alias for stoolType" },
         note: { type: "string" },
-        recordedAt: { type: "string" },
+        recordedAt: { type: "string", description: "ISO-8601 timestamp with timezone offset (defaults to now)" },
         requestId: { type: "string" },
         client: { type: "string" }
       }
@@ -933,7 +1126,7 @@ export const TOOL_DEFINITIONS = [
         stoolType: { type: "integer", minimum: 1, maximum: 7 },
         bristol: { type: "integer", minimum: 1, maximum: 7 },
         note: { type: "string" },
-        recordedAt: { type: "string" },
+        recordedAt: { type: "string", description: "Replacement ISO-8601 timestamp with timezone offset" },
         requestId: { type: "string" },
         client: { type: "string" }
       }

@@ -91,6 +91,7 @@ export interface SxCatalog {
   projects?: SxCatalogProject[];
   tags?: string[];
   rules?: string[];
+  fieldGuide?: Record<string, unknown>;
   [key: string]: unknown;
 }
 
@@ -164,6 +165,8 @@ export interface SxExpenseRecord {
   notes: string;
   paidAt: string;
   localDate?: string;
+  localHour?: number;
+  displayDate?: string;
   createdAt?: string;
   isAutoRecorded?: boolean;
   refunds?: SxRefundRecord[];

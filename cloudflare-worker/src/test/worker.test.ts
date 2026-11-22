@@ -1090,3 +1090,422 @@ test("queues same-batch SX create_project, create_tag, create_credential(project
   assert.equal(credsData.items[0].links[0].projectName, "NewDomain");
   assert.equal(credsData.items[0].links[0].hasStartDate, true);
 });
+
+test("exposes complete SX MCP tool & property descriptions and fieldGuide in sx_get_catalog", async () => {
+  const env = makeEnv();
+  await callJson(env, "/sync/sx/snapshot", {
+    method: "PUT",
+    body: {
+      bundleId: "ai.chaox.sx",
+      appVersion: "0.1.1",
+      permission: "readWrite",
+      policy: {
+        allowRead: true,
+        allowCreate: true,
+        allowUpdate: true,
+        allowDelete: true,
+        allowedDomains: ["projects", "expenses", "incomes", "tags", "slogans", "credentials"],
+        consentAcknowledged: true
+      },
+      capabilities: ["catalog", "summary", "projects", "expenses", "incomes", "tags", "slogans", "credentials"],
+      catalog: {
+        timeZoneIdentifier: "Asia/Shanghai",
+        summaryCurrency: "CNY",
+        supportedCurrencies: ["CNY", "USD"],
+        projects: [{ name: "EatingDrinkingOut", currency: "CNY", supportsExpense: true, supportsIncome: false }],
+        tags: ["Lunch"]
+      },
+      summary: { timeZoneIdentifier: "Asia/Shanghai", summaryCurrency: "CNY", expense: {}, income: {} }
+    }
+  });
+
+  const toolsRes = await callJson(env, "/mcp", {
+    method: "POST",
+    body: { jsonrpc: "2.0", id: 70, method: "tools/list" }
+  });
+  const tools = (
+    toolsRes.data.result as {
+      tools: Array<{
+        name: string;
+        description?: string;
+        inputSchema?: { properties?: Record<string, { description?: string }> };
+      }>;
+    }
+  ).tools;
+  assert.equal(tools.length, 67);
+
+  const sxTools = tools.filter((t) => t.name.startsWith("sx_"));
+  assert.ok(sxTools.length >= 25);
+  for (const tool of sxTools) {
+    assert.ok(tool.description && tool.description.trim().length > 15, `Missing description on ${tool.name}`);
+  }
+
+  const toolsRequiringFullPropertyDocs = [
+    "sx_list_expenses",
+    "sx_record_expense",
+    "sx_update_expense",
+    "sx_record_refund",
+    "sx_list_incomes",
+    "sx_record_income",
+    "sx_update_income",
+    "sx_create_project",
+    "sx_update_project",
+    "sx_create_slogan",
+    "sx_create_credential",
+    "sx_link_credential",
+    "sx_update_credential_link"
+  ];
+  for (const toolName of toolsRequiringFullPropertyDocs) {
+    const tool = tools.find((t) => t.name === toolName);
+    assert.ok(tool, `Missing tool ${toolName}`);
+    const props = tool.inputSchema?.properties ?? {};
+    for (const [propName, propSchema] of Object.entries(props)) {
+      assert.ok(
+        typeof propSchema.description === "string" && propSchema.description.trim().length > 0,
+        `Missing property description on ${toolName}.${propName}`
+      );
+    }
+  }
+
+  const recordExpense = tools.find((t) => t.name === "sx_record_expense");
+  assert.ok(recordExpense?.inputSchema?.properties?.hour);
+  assert.match(recordExpense.description ?? "", /YYYY-MM-DD-HH/);
+
+  const catalogRes = await callJson(env, "/mcp", {
+    method: "POST",
+    body: { jsonrpc: "2.0", id: 71, method: "tools/call", params: { name: "sx_get_catalog", arguments: {} } }
+  });
+  const catalogData = JSON.parse(((catalogRes.data.result as { content: Array<{ text: string }> }).content[0]).text) as {
+    fieldGuide?: { expenseDisplayDateFormat?: string; commonPitfalls?: string[] };
+  };
+  assert.match(catalogData.fieldGuide?.expenseDisplayDateFormat ?? "", /YYYY-MM-DD-HH/);
+  assert.ok((catalogData.fieldGuide?.commonPitfalls?.length ?? 0) >= 4);
+});
+
+test("resolves SX expense hour formats in device timezone, accepts note/notes alias, and enriches sx_list_expenses", async () => {
+  const env = makeEnv();
+  await callJson(env, "/sync/sx/snapshot", {
+    method: "PUT",
+    body: {
+      bundleId: "ai.chaox.sx",
+      appVersion: "0.1.2",
+      permission: "readWrite",
+      policy: {
+        allowRead: true,
+        allowCreate: true,
+        allowUpdate: true,
+        allowDelete: false,
+        allowedDomains: ["projects", "expenses", "incomes", "tags", "slogans"],
+        consentAcknowledged: true
+      },
+      capabilities: ["catalog", "summary", "projects", "expenses", "tags"],
+      catalog: {
+        timeZoneIdentifier: "Asia/Shanghai",
+        summaryCurrency: "CNY",
+        supportedCurrencies: ["CNY", "USD"],
+        projects: [{ name: "EatingDrinkingOut", currency: "CNY", supportsExpense: true, supportsIncome: false }],
+        tags: ["Lunch"]
+      },
+      summary: { timeZoneIdentifier: "Asia/Shanghai", summaryCurrency: "CNY", expense: {}, income: {} },
+      datasets: {
+        expenses: [
+          {
+            id: 10,
+            projectId: 1,
+            projectName: "EatingDrinkingOut",
+            amount: 21,
+            netAmount: 21,
+            refundTotal: 0,
+            currency: "CNY",
+            tags: ["Breakfast"],
+            notes: "Panini",
+            paidAt: "2026-11-21T01:00:00Z"
+          }
+        ]
+      }
+    }
+  });
+
+  // 1) Bare YYYY-MM-DD resolves to local 00:00 in Asia/Shanghai, NOT T12:00:00Z (20:00 BJT).
+  const bareRes = await callJson(env, "/mcp", {
+    method: "POST",
+    body: {
+      jsonrpc: "2.0",
+      id: 80,
+      method: "tools/call",
+      params: {
+        name: "sx_record_expense",
+        arguments: {
+          amount: 10.98,
+          currency: "USD",
+          projectName: "EatingDrinkingOut",
+          date: "2026-11-21",
+          requestId: "tz-bare-day"
+        }
+      }
+    }
+  });
+  const bareData = JSON.parse(((bareRes.data.result as { content: Array<{ text: string }> }).content[0]).text) as {
+    normalizedPayload: Record<string, unknown>;
+    resolvedLocalTime: { localDate: string; localHour: number; displayDate: string };
+  };
+  assert.equal(bareData.normalizedPayload.date, "2026-11-20T16:00:00.000Z");
+  assert.equal(bareData.resolvedLocalTime.localDate, "2026-11-21");
+  assert.equal(bareData.resolvedLocalTime.localHour, 0);
+  assert.equal(bareData.resolvedLocalTime.displayDate, "2026-11-21-00");
+
+  // 2) YYYY-MM-DD + explicit hour + notes alias produces canonical ISO & note without leaking extra payload keys.
+  const hourRes = await callJson(env, "/mcp", {
+    method: "POST",
+    body: {
+      jsonrpc: "2.0",
+      id: 81,
+      method: "tools/call",
+      params: {
+        name: "sx_record_expense",
+        arguments: {
+          amount: 18.5,
+          projectName: "EatingDrinkingOut",
+          date: "2026-11-22",
+          hour: 12,
+          notes: "Salad via notes alias",
+          requestId: "tz-date-hour"
+        }
+      }
+    }
+  });
+  const hourData = JSON.parse(((hourRes.data.result as { content: Array<{ text: string }> }).content[0]).text) as {
+    normalizedPayload: Record<string, unknown>;
+    resolvedLocalTime: { localDate: string; localHour: number; displayDate: string };
+  };
+  assert.equal(hourData.normalizedPayload.date, "2026-11-22T04:00:00.000Z");
+  assert.equal(hourData.normalizedPayload.note, "Salad via notes alias");
+  assert.equal(hourData.normalizedPayload.hour, undefined);
+  assert.equal(hourData.normalizedPayload.notes, undefined);
+  assert.equal(hourData.resolvedLocalTime.displayDate, "2026-11-22-12");
+
+  // 3) SX display format YYYY-MM-DD-HH parses cleanly.
+  const displayRes = await callJson(env, "/mcp", {
+    method: "POST",
+    body: {
+      jsonrpc: "2.0",
+      id: 82,
+      method: "tools/call",
+      params: {
+        name: "sx_record_expense",
+        arguments: {
+          amount: 21,
+          projectName: "EatingDrinkingOut",
+          date: "2026-11-22-09",
+          requestId: "tz-display-fmt"
+        }
+      }
+    }
+  });
+  const displayData = JSON.parse(((displayRes.data.result as { content: Array<{ text: string }> }).content[0]).text) as {
+    normalizedPayload: Record<string, unknown>;
+    resolvedLocalTime: { localHour: number; displayDate: string };
+  };
+  assert.equal(displayData.normalizedPayload.date, "2026-11-22T01:00:00.000Z");
+  assert.equal(displayData.resolvedLocalTime.localHour, 9);
+  assert.equal(displayData.resolvedLocalTime.displayDate, "2026-11-22-09");
+
+  // 4) Naive local YYYY-MM-DD HH:mm interprets in Asia/Shanghai.
+  const localRes = await callJson(env, "/mcp", {
+    method: "POST",
+    body: {
+      jsonrpc: "2.0",
+      id: 83,
+      method: "tools/call",
+      params: {
+        name: "sx_record_expense",
+        arguments: {
+          amount: 14,
+          projectName: "EatingDrinkingOut",
+          date: "2026-11-22 14:30",
+          requestId: "tz-naive-local"
+        }
+      }
+    }
+  });
+  const localData = JSON.parse(((localRes.data.result as { content: Array<{ text: string }> }).content[0]).text) as {
+    normalizedPayload: Record<string, unknown>;
+    resolvedLocalTime: { localHour: number; displayDate: string };
+  };
+  assert.equal(localData.normalizedPayload.date, "2026-11-22T06:30:00.000Z");
+  assert.equal(localData.resolvedLocalTime.localHour, 14);
+  assert.equal(localData.resolvedLocalTime.displayDate, "2026-11-22-14");
+
+  // 5) Out-of-range hour is rejected.
+  const badHour = await callJson(env, "/mcp", {
+    method: "POST",
+    body: {
+      jsonrpc: "2.0",
+      id: 84,
+      method: "tools/call",
+      params: {
+        name: "sx_record_expense",
+        arguments: { amount: 10, projectName: "EatingDrinkingOut", date: "2026-11-22", hour: 24 }
+      }
+    }
+  });
+  assert.equal((badHour.data.result as { isError?: boolean }).isError, true);
+
+  // 6) Updating hour alone preserves existing snapshot expense's localDate; unknown ID rejects clearly.
+  const updHour = await callJson(env, "/mcp", {
+    method: "POST",
+    body: {
+      jsonrpc: "2.0",
+      id: 85,
+      method: "tools/call",
+      params: {
+        name: "sx_update_expense",
+        arguments: { id: 10, hour: 15, requestId: "tz-upd-hour" }
+      }
+    }
+  });
+  const updHourData = JSON.parse(((updHour.data.result as { content: Array<{ text: string }> }).content[0]).text) as {
+    normalizedPayload: Record<string, unknown>;
+    resolvedLocalTime: { localDate: string; localHour: number; displayDate: string };
+  };
+  assert.equal(updHourData.normalizedPayload.date, "2026-11-21T07:00:00.000Z");
+  assert.equal(updHourData.resolvedLocalTime.displayDate, "2026-11-21-15");
+
+  const updUnknownHour = await callJson(env, "/mcp", {
+    method: "POST",
+    body: {
+      jsonrpc: "2.0",
+      id: 86,
+      method: "tools/call",
+      params: { name: "sx_update_expense", arguments: { id: 9999, hour: 15 } }
+    }
+  });
+  assert.equal((updUnknownHour.data.result as { isError?: boolean }).isError, true);
+
+  // 7) sx_list_expenses returns timeZoneIdentifier, localDate, localHour, and displayDate on overlaid & committed items.
+  const listRes = await callJson(env, "/mcp", {
+    method: "POST",
+    body: { jsonrpc: "2.0", id: 87, method: "tools/call", params: { name: "sx_list_expenses", arguments: {} } }
+  });
+  const listData = JSON.parse(((listRes.data.result as { content: Array<{ text: string }> }).content[0]).text) as {
+    timeZoneIdentifier: string | null;
+    items: Array<{ id: number; localDate?: string; localHour?: number; displayDate?: string; notes: string }>;
+  };
+  assert.equal(listData.timeZoneIdentifier, "Asia/Shanghai");
+  const existingUpdated = listData.items.find((item) => item.id === 10);
+  assert.equal(existingUpdated?.localDate, "2026-11-21");
+  assert.equal(existingUpdated?.localHour, 15);
+  assert.equal(existingUpdated?.displayDate, "2026-11-21-15");
+  const displayDates = new Set(listData.items.map((item) => item.displayDate));
+  assert.ok(displayDates.has("2026-11-21-00"));
+  assert.ok(displayDates.has("2026-11-22-12"));
+  assert.ok(displayDates.has("2026-11-22-09"));
+  assert.ok(displayDates.has("2026-11-22-14"));
+
+  // 8) 'YYYY-MM-DD HH' and 'YYYY-MM-DDTHH' formats, sequential FIFO updates on same id, stringified '09' hour, and loud invalid-hour error.
+  const spaceHourRes = await callJson(env, "/mcp", {
+    method: "POST",
+    body: {
+      jsonrpc: "2.0",
+      id: 88,
+      method: "tools/call",
+      params: {
+        name: "sx_record_expense",
+        arguments: {
+          amount: 9.5,
+          projectName: "EatingDrinkingOut",
+          date: "2026-11-22 09",
+          requestId: "tz-space-hour"
+        }
+      }
+    }
+  });
+  const spaceHourData = JSON.parse(((spaceHourRes.data.result as { content: Array<{ text: string }> }).content[0]).text) as {
+    normalizedPayload: Record<string, unknown>;
+  };
+  assert.equal(spaceHourData.normalizedPayload.date, "2026-11-22T01:00:00.000Z");
+
+  const tHourRes = await callJson(env, "/mcp", {
+    method: "POST",
+    body: {
+      jsonrpc: "2.0",
+      id: 89,
+      method: "tools/call",
+      params: {
+        name: "sx_record_expense",
+        arguments: {
+          amount: 9.5,
+          projectName: "EatingDrinkingOut",
+          date: "2026-11-22T09",
+          requestId: "tz-t-hour"
+        }
+      }
+    }
+  });
+  const tHourData = JSON.parse(((tHourRes.data.result as { content: Array<{ text: string }> }).content[0]).text) as {
+    normalizedPayload: Record<string, unknown>;
+  };
+  assert.equal(tHourData.normalizedPayload.date, "2026-11-22T01:00:00.000Z");
+
+  const invalidHourStr = await callJson(env, "/mcp", {
+    method: "POST",
+    body: {
+      jsonrpc: "2.0",
+      id: 90,
+      method: "tools/call",
+      params: {
+        name: "sx_record_expense",
+        arguments: { amount: 10, projectName: "EatingDrinkingOut", date: "2026-11-22", hour: "morning" }
+      }
+    }
+  });
+  assert.equal((invalidHourStr.data.result as { isError?: boolean }).isError, true);
+
+  // Follow-up queued updates on existing id #10 before sync: date-only then hour:'09' execute FIFO and keep amount/currency/notes intact.
+  const followUp1 = await callJson(env, "/mcp", {
+    method: "POST",
+    body: {
+      jsonrpc: "2.0",
+      id: 91,
+      method: "tools/call",
+      params: {
+        name: "sx_update_expense",
+        arguments: { id: 10, date: "2026-11-22", requestId: "tz-fifo-upd-1" }
+      }
+    }
+  });
+  assert.notEqual((followUp1.data.result as { isError?: boolean }).isError, true);
+
+  const followUp2 = await callJson(env, "/mcp", {
+    method: "POST",
+    body: {
+      jsonrpc: "2.0",
+      id: 92,
+      method: "tools/call",
+      params: {
+        name: "sx_update_expense",
+        arguments: { id: 10, hour: "09", requestId: "tz-fifo-upd-2" }
+      }
+    }
+  });
+  assert.notEqual((followUp2.data.result as { isError?: boolean }).isError, true);
+  const followUp2Data = JSON.parse(((followUp2.data.result as { content: Array<{ text: string }> }).content[0]).text) as {
+    normalizedPayload: Record<string, unknown>;
+    resolvedLocalTime: { displayDate: string };
+  };
+  assert.equal(followUp2Data.normalizedPayload.date, "2026-11-22T01:00:00.000Z");
+  assert.equal(followUp2Data.resolvedLocalTime.displayDate, "2026-11-22-09");
+
+  const listAfterFifo = await callJson(env, "/mcp", {
+    method: "POST",
+    body: { jsonrpc: "2.0", id: 93, method: "tools/call", params: { name: "sx_list_expenses", arguments: {} } }
+  });
+  const afterFifoData = JSON.parse(((listAfterFifo.data.result as { content: Array<{ text: string }> }).content[0]).text) as {
+    items: Array<{ id: number; amount: number; currency: string; notes: string; displayDate?: string }>;
+  };
+  const item10AfterFifo = afterFifoData.items.find((item) => item.id === 10);
+  assert.equal(item10AfterFifo?.displayDate, "2026-11-22-09");
+  assert.equal(item10AfterFifo?.amount, 21);
+  assert.equal(item10AfterFifo?.currency, "CNY");
+  assert.equal(item10AfterFifo?.notes, "Panini");
+});

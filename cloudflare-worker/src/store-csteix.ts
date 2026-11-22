@@ -8,7 +8,8 @@ import {
   paginate,
   ReceiptRow,
   requireNonEmptyString,
-  safeJsonParse
+  safeJsonParse,
+  zonedLocalToUtcIso
 } from "./store-helpers.js";
 import {
   AgentAppID,
@@ -150,61 +151,6 @@ function normalizeTimezone(raw: unknown): string {
     throw new Error(`Invalid IANA timezone '${tz}'.`);
   }
   return tz;
-}
-
-function zonedLocalToUtcIso(
-  year: number,
-  month: number,
-  day: number,
-  hour: number,
-  minute: number,
-  second: number,
-  timeZone: string
-): string {
-  const targetUtcMs = Date.UTC(year, month - 1, day, hour, minute, second, 0);
-  const formatter = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hourCycle: "h23"
-  });
-
-  const partsMs = (ms: number): number => {
-    const parts = formatter.formatToParts(new Date(ms));
-    const map: Record<string, number> = {};
-    for (const part of parts) {
-      if (part.type !== "literal") map[part.type] = Number(part.value);
-    }
-    const h = map.hour === 24 ? 0 : map.hour;
-    return Date.UTC(map.year, map.month - 1, map.day, h, map.minute, map.second, 0);
-  };
-
-  let guess = targetUtcMs;
-  for (let i = 0; i < 3; i += 1) {
-    const represented = partsMs(guess);
-    const diff = represented - targetUtcMs;
-    if (diff === 0) break;
-    guess -= diff;
-  }
-
-  // Validate that the requested calendar date/time actually existed (e.g. reject Feb 30).
-  const checkDate = new Date(Date.UTC(year, month - 1, day, hour, minute, second, 0));
-  if (
-    checkDate.getUTCFullYear() !== year ||
-    checkDate.getUTCMonth() !== month - 1 ||
-    checkDate.getUTCDate() !== day ||
-    checkDate.getUTCHours() !== hour ||
-    checkDate.getUTCMinutes() !== minute ||
-    checkDate.getUTCSeconds() !== second
-  ) {
-    throw new Error(`Invalid calendar timestamp: ${year}-${month}-${day} ${hour}:${minute}`);
-  }
-
-  return new Date(guess).toISOString();
 }
 
 export function normalizeWrittenAt(raw: unknown, timezone: string): string {
