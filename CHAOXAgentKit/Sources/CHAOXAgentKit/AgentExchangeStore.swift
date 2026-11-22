@@ -23,18 +23,27 @@ public actor AgentExchangeStore {
     private var isBusy = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
 
+    private static let defaultNoCacheSession: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.urlCache = nil
+        config.httpCookieStorage = nil
+        config.httpShouldSetCookies = false
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: config)
+    }()
+
     public init(
         app: AgentAppID,
         defaultsSuiteName: String? = nil,
         keyPrefix: String? = nil,
-        urlSession: URLSession = .shared,
+        urlSession: URLSession? = nil,
         inMemoryTokenStorage: Bool = false
     ) {
         self.init(
             app: app,
             defaultsSuiteName: defaultsSuiteName,
             keyPrefix: keyPrefix,
-            urlSession: urlSession,
+            urlSession: urlSession ?? Self.defaultNoCacheSession,
             tokenStorage: inMemoryTokenStorage ? InMemoryTokenStorage() : KeychainTokenStorage()
         )
     }
@@ -43,13 +52,13 @@ public actor AgentExchangeStore {
         app: AgentAppID,
         defaultsSuiteName: String? = nil,
         keyPrefix: String? = nil,
-        urlSession: URLSession = .shared,
+        urlSession: URLSession? = nil,
         tokenStorage: any AgentTokenStorage
     ) {
         self.app = app
         self.defaultsSuiteName = defaultsSuiteName
         self.keyPrefix = keyPrefix ?? "chaox.agent.\(app.rawValue)"
-        self.urlSession = urlSession
+        self.urlSession = urlSession ?? Self.defaultNoCacheSession
         self.tokenStorage = tokenStorage
     }
 
@@ -760,6 +769,8 @@ public actor AgentExchangeStore {
 
         var request = URLRequest(url: url, timeoutInterval: 20)
         request.httpMethod = method
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.httpShouldHandleCookies = false
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         if let token {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -806,6 +817,11 @@ public actor AgentExchangeStore {
         guard scheme == "https" || (scheme == "http" && isLocalhost) else {
             throw AgentExchangeError.invalidRemoteURL(
                 "Only https:// endpoints are allowed (http:// is restricted to localhost)."
+            )
+        }
+        guard parsed.user == nil, parsed.password == nil else {
+            throw AgentExchangeError.invalidRemoteURL(
+                "Endpoint URL must not include embedded credentials. Use Bearer Token instead."
             )
         }
 

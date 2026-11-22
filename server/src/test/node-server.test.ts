@@ -342,3 +342,51 @@ test("SqliteDatabase cleanly opens and migrates a D1-exported SQLite file withou
     db2.close();
   });
 });
+
+test("node server enforces per-IP 401 rate limit, protects against malformed Host headers, and supports split tokens", async () => {
+  await withTempDir(async (tmpDir) => {
+    const dbPath = path.join(tmpDir, "rate-limit.sqlite");
+    const syncToken = "sync-token-0123456789abcdef01234567";
+    const mcpToken = "mcp-token-0123456789abcdef012345678";
+
+    const server = await startNodeServer({
+      host: "127.0.0.1",
+      port: 0,
+      dbPath,
+      syncToken,
+      mcpToken,
+      trustProxy: false,
+      authRateLimit: { maxAttempts: 3, windowMs: 10_000 },
+      quiet: true
+    });
+
+    try {
+      // Three bad auth attempts trigger HTTP 429 on the 4th attempt.
+      for (let i = 0; i < 3; i += 1) {
+        const res = await fetch(`${server.baseUrl}/preferences`, {
+          headers: { Authorization: "Bearer wrong-token" }
+        });
+        assert.equal(res.status, 401);
+        assert.equal(res.headers.get("Cache-Control"), "no-store");
+        assert.equal(res.headers.get("X-Content-Type-Options"), "nosniff");
+      }
+
+      const throttled = await fetch(`${server.baseUrl}/preferences`, {
+        headers: { Authorization: `Bearer ${mcpToken}` }
+      });
+      assert.equal(throttled.status, 429);
+      assert.ok(Number(throttled.headers.get("Retry-After")) >= 1);
+
+      // /health continues to work cleanly even when auth is rate-limited.
+      const health = await fetch(`${server.baseUrl}/health`, {
+        headers: {
+          "X-Forwarded-Host": "bad host name!!",
+          "X-Forwarded-Proto": "javascript"
+        }
+      });
+      assert.equal(health.status, 200);
+    } finally {
+      await server.close();
+    }
+  });
+});

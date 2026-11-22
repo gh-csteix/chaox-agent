@@ -7,7 +7,12 @@ import { SqliteDatabase } from "./sqlite.js";
 
 const DEFAULT_PORT = 8787;
 const DEFAULT_HOST = "0.0.0.0";
-const DEFAULT_MAX_BODY_BYTES = 20 * 1024 * 1024; // 20 MiB
+const DEFAULT_MAX_BODY_BYTES = 20 * 1024 * 1024; // 20 MiB for /sync/* payloads
+const DEFAULT_MCP_MAX_BODY_BYTES = 2 * 1024 * 1024; // 2 MiB for /mcp and /preferences
+const MIN_RECOMMENDED_TOKEN_LENGTH = 24;
+const DEFAULT_AUTH_RATE_LIMIT_MAX = 20;
+const DEFAULT_AUTH_RATE_LIMIT_WINDOW_MS = 60_000;
+const MAX_RATE_LIMIT_BUCKETS = 2048;
 const GZIP_MIN_BYTES = 1024;
 
 class PayloadTooLargeError extends Error {
@@ -23,6 +28,13 @@ export interface NodeServerOptions {
   dbPath?: string;
   migrationsDir?: string | null;
   authToken?: string;
+  syncToken?: string;
+  mcpToken?: string;
+  mcpReadOnlyToken?: string;
+  allowedOrigins?: string;
+  allowMcpPreferencesWrite?: boolean;
+  trustProxy?: boolean;
+  authRateLimit?: { maxAttempts: number; windowMs: number } | false;
   backendMode?: string;
   serverName?: string;
   maxBodyBytes?: number;
@@ -171,6 +183,39 @@ async function writeWebResponse(
   res.end(rawBytes);
 }
 
+function resolveClientIp(req: http.IncomingMessage, trustProxy: boolean): string {
+  if (trustProxy) {
+    const forwarded = firstHeaderValue(req.headers["x-forwarded-for"]);
+    if (forwarded) return forwarded;
+  }
+  return req.socket?.remoteAddress || "unknown";
+}
+
+function buildRequestUrl(
+  rawUrl: string,
+  req: http.IncomingMessage,
+  trustProxy: boolean,
+  fallbackPort: number
+): URL {
+  const protoRaw = trustProxy
+    ? firstHeaderValue(req.headers["x-forwarded-proto"])?.toLowerCase()
+    : undefined;
+  const proto = protoRaw === "https" || protoRaw === "http" ? protoRaw : "http";
+  const candidateHost =
+    (trustProxy ? firstHeaderValue(req.headers["x-forwarded-host"]) : undefined) ||
+    firstHeaderValue(req.headers.host) ||
+    `127.0.0.1:${fallbackPort}`;
+  try {
+    return new URL(rawUrl, `${proto}://${candidateHost}`);
+  } catch {
+    try {
+      return new URL(rawUrl, `http://127.0.0.1:${fallbackPort}`);
+    } catch {
+      return new URL("/", `http://127.0.0.1:${fallbackPort}`);
+    }
+  }
+}
+
 export async function startNodeServer(
   options: NodeServerOptions = {}
 ): Promise<RunningNodeServer> {
@@ -181,39 +226,114 @@ export async function startNodeServer(
     process.env.CHAOX_DB_PATH?.trim() ??
     path.resolve(process.cwd(), "data/chaox-agent.sqlite");
   const authToken = options.authToken ?? process.env.CHAOX_AUTH_TOKEN?.trim() ?? "";
+  const syncToken = options.syncToken ?? process.env.CHAOX_SYNC_TOKEN?.trim() ?? "";
+  const mcpToken = options.mcpToken ?? process.env.CHAOX_MCP_TOKEN?.trim() ?? "";
+  const mcpReadOnlyToken =
+    options.mcpReadOnlyToken ?? process.env.CHAOX_MCP_READONLY_TOKEN?.trim() ?? "";
+  const allowedOrigins =
+    options.allowedOrigins ?? process.env.CHAOX_ALLOWED_ORIGINS?.trim() ?? undefined;
+  const allowMcpPreferencesWriteEnv =
+    options.allowMcpPreferencesWrite !== undefined
+      ? options.allowMcpPreferencesWrite
+        ? "true"
+        : "false"
+      : process.env.CHAOX_ALLOW_MCP_PREFERENCES_WRITE?.trim();
+  const rawTrustProxy = process.env.CHAOX_TRUST_PROXY?.trim().toLowerCase() ?? "";
+  const trustProxy =
+    options.trustProxy ?? (rawTrustProxy === "1" || rawTrustProxy === "true");
   const backendMode = options.backendMode ?? process.env.CHAOX_BACKEND_MODE?.trim() ?? "sqlite";
   const serverName =
     options.serverName ?? process.env.CHAOX_SERVER_NAME?.trim() ?? "chaox-agent-server";
   const maxBodyBytes = options.maxBodyBytes ?? parseMaxBodyBytes(process.env.CHAOX_MAX_BODY_BYTES);
+  const rateLimitConfig =
+    options.authRateLimit === false
+      ? null
+      : (options.authRateLimit ?? {
+          maxAttempts: DEFAULT_AUTH_RATE_LIMIT_MAX,
+          windowMs: DEFAULT_AUTH_RATE_LIMIT_WINDOW_MS
+        });
 
   const db = new SqliteDatabase(dbPath, { migrationsDir: options.migrationsDir });
 
-  if (!authToken && !options.quiet) {
-    console.warn(
-      "[chaox-agent-server] WARNING: CHAOX_AUTH_TOKEN is not set. Protected routes (/mcp, /sync/*, /preferences) will return 401 until configured."
-    );
+  if (!options.quiet) {
+    const configuredTokens: Array<[string, string]> = (
+      [
+        ["CHAOX_AUTH_TOKEN", authToken],
+        ["CHAOX_SYNC_TOKEN", syncToken],
+        ["CHAOX_MCP_TOKEN", mcpToken],
+        ["CHAOX_MCP_READONLY_TOKEN", mcpReadOnlyToken]
+      ] as Array<[string, string]>
+    ).filter(([, val]) => val.length > 0);
+
+    if (configuredTokens.length === 0) {
+      console.warn(
+        "[chaox-agent-server] WARNING: No auth token is configured (CHAOX_AUTH_TOKEN or CHAOX_SYNC_TOKEN/CHAOX_MCP_TOKEN). Protected routes (/mcp, /sync/*, /preferences) will return 401 until configured."
+      );
+    } else {
+      for (const [envName, val] of configuredTokens) {
+        if (val.length < MIN_RECOMMENDED_TOKEN_LENGTH) {
+          console.warn(
+            `[chaox-agent-server] WARNING: ${envName} is shorter than ${MIN_RECOMMENDED_TOKEN_LENGTH} characters. Generate a stronger random token with 'npm run token' or 'openssl rand -hex 32'.`
+          );
+        }
+      }
+    }
   }
 
   let boundPort = port;
+  const failedAuthByIp = new Map<string, number[]>();
+
+  const pruneWindow = (ip: string, now: number, windowMs: number): number[] => {
+    const cutoff = now - windowMs;
+    const recent = (failedAuthByIp.get(ip) ?? []).filter((ts) => ts >= cutoff);
+    if (recent.length === 0) {
+      failedAuthByIp.delete(ip);
+    } else {
+      failedAuthByIp.set(ip, recent);
+    }
+    return recent;
+  };
 
   const server = http.createServer(async (req, res) => {
     const method = (req.method || "GET").toUpperCase();
-    server.keepAliveTimeout = 65_000;
-  server.headersTimeout = 66_000;
-  server.requestTimeout = 30_000;
 
-  try {
-      const proto = firstHeaderValue(req.headers["x-forwarded-proto"]) || "http";
-      const headerHost =
-        firstHeaderValue(req.headers["x-forwarded-host"]) ||
-        firstHeaderValue(req.headers.host) ||
-        `127.0.0.1:${boundPort}`;
+    try {
       const rawUrl = req.url || "/";
-      const requestUrl = new URL(rawUrl, `${proto}://${headerHost}`);
+      const requestUrl = buildRequestUrl(rawUrl, req, trustProxy, boundPort);
+      const clientIp = resolveClientIp(req, trustProxy);
+      const bypassRateLimit = method === "OPTIONS" || requestUrl.pathname === "/health";
+
+      if (rateLimitConfig && !bypassRateLimit) {
+        const now = Date.now();
+        const recentFailures = pruneWindow(clientIp, now, rateLimitConfig.windowMs);
+        if (recentFailures.length >= rateLimitConfig.maxAttempts) {
+          const oldest = recentFailures[0] ?? now;
+          const retryAfterSeconds = Math.max(
+            1,
+            Math.ceil((oldest + rateLimitConfig.windowMs - now) / 1000)
+          );
+          res.statusCode = 429;
+          res.setHeader("Content-Type", "application/json; charset=utf-8");
+          res.setHeader("Cache-Control", "no-store");
+          res.setHeader("X-Content-Type-Options", "nosniff");
+          res.setHeader("Retry-After", String(retryAfterSeconds));
+          res.end(
+            JSON.stringify({
+              error: "Too many failed authentication attempts. Please retry later."
+            })
+          );
+          return;
+        }
+      }
+
+      const routeMaxBodyBytes =
+        requestUrl.pathname === "/mcp" || requestUrl.pathname === "/preferences"
+          ? Math.min(maxBodyBytes, DEFAULT_MCP_MAX_BODY_BYTES)
+          : maxBodyBytes;
 
       let body: ArrayBuffer | undefined;
       if (method !== "GET" && method !== "HEAD" && method !== "OPTIONS") {
-        const buffer = await readRequestBody(req, maxBodyBytes);
+        const buffer = await readRequestBody(req, routeMaxBodyBytes);
         if (buffer.length > 0) {
           body = buffer.buffer.slice(
             buffer.byteOffset,
@@ -230,10 +350,34 @@ export async function startNodeServer(
 
       const webRes = await handleRequest(webReq, {
         DB: db,
-        CHAOX_AUTH_TOKEN: authToken,
+        CHAOX_AUTH_TOKEN: authToken || undefined,
+        CHAOX_SYNC_TOKEN: syncToken || undefined,
+        CHAOX_MCP_TOKEN: mcpToken || undefined,
+        CHAOX_MCP_READONLY_TOKEN: mcpReadOnlyToken || undefined,
+        CHAOX_ALLOWED_ORIGINS: allowedOrigins,
+        CHAOX_ALLOW_MCP_PREFERENCES_WRITE: allowMcpPreferencesWriteEnv,
         BACKEND_MODE: backendMode,
         SERVER_NAME: serverName
       });
+
+      if (rateLimitConfig && !bypassRateLimit) {
+        const now = Date.now();
+        if (webRes.status === 401) {
+          if (!failedAuthByIp.has(clientIp) && failedAuthByIp.size >= MAX_RATE_LIMIT_BUCKETS) {
+            for (const [trackedIp] of failedAuthByIp) {
+              pruneWindow(trackedIp, now, rateLimitConfig.windowMs);
+            }
+            if (failedAuthByIp.size >= MAX_RATE_LIMIT_BUCKETS) {
+              failedAuthByIp.clear();
+            }
+          }
+          const recent = pruneWindow(clientIp, now, rateLimitConfig.windowMs);
+          recent.push(now);
+          failedAuthByIp.set(clientIp, recent);
+        } else if (webRes.status < 400) {
+          failedAuthByIp.delete(clientIp);
+        }
+      }
 
       const acceptEncoding = firstHeaderValue(req.headers["accept-encoding"]);
       await writeWebResponse(res, webRes, method, acceptEncoding);
@@ -242,6 +386,8 @@ export async function startNodeServer(
         if (!res.headersSent) {
           res.statusCode = 413;
           res.setHeader("Content-Type", "application/json; charset=utf-8");
+          res.setHeader("Cache-Control", "no-store");
+          res.setHeader("X-Content-Type-Options", "nosniff");
           res.end(JSON.stringify({ error: error.message }));
         }
         return;
@@ -253,11 +399,9 @@ export async function startNodeServer(
       if (!res.headersSent) {
         res.statusCode = 500;
         res.setHeader("Content-Type", "application/json; charset=utf-8");
-        res.end(
-          JSON.stringify({
-            error: error instanceof Error ? error.message : "Internal server error"
-          })
-        );
+        res.setHeader("Cache-Control", "no-store");
+        res.setHeader("X-Content-Type-Options", "nosniff");
+        res.end(JSON.stringify({ error: "Internal server error" }));
       } else if (!res.writableEnded) {
         res.end();
       }

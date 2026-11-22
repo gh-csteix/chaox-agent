@@ -37,7 +37,12 @@ export interface SqlDatabase {
 
 export interface ServerEnv {
   DB: SqlDatabase;
-  CHAOX_AUTH_TOKEN: string;
+  CHAOX_AUTH_TOKEN?: string;
+  CHAOX_SYNC_TOKEN?: string;
+  CHAOX_MCP_TOKEN?: string;
+  CHAOX_MCP_READONLY_TOKEN?: string;
+  CHAOX_ALLOWED_ORIGINS?: string;
+  CHAOX_ALLOW_MCP_PREFERENCES_WRITE?: string;
   BACKEND_MODE?: string;
   SERVER_NAME?: string;
 }

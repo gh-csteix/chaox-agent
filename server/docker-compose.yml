@@ -3,12 +3,25 @@ services:
     build: .
     container_name: chaox-agent-server
     restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=16m
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${PORT:-8787}:8787"
     environment:
       HOST: "0.0.0.0"
       PORT: "8787"
-      CHAOX_AUTH_TOKEN: "${CHAOX_AUTH_TOKEN}"
+      CHAOX_AUTH_TOKEN: "${CHAOX_AUTH_TOKEN:-}"
+      CHAOX_SYNC_TOKEN: "${CHAOX_SYNC_TOKEN:-}"
+      CHAOX_MCP_TOKEN: "${CHAOX_MCP_TOKEN:-}"
+      CHAOX_MCP_READONLY_TOKEN: "${CHAOX_MCP_READONLY_TOKEN:-}"
+      CHAOX_ALLOWED_ORIGINS: "${CHAOX_ALLOWED_ORIGINS:-}"
+      CHAOX_ALLOW_MCP_PREFERENCES_WRITE: "${CHAOX_ALLOW_MCP_PREFERENCES_WRITE:-}"
+      CHAOX_TRUST_PROXY: "${CHAOX_TRUST_PROXY:-false}"
       CHAOX_DB_PATH: "${CHAOX_DB_PATH:-/data/chaox-agent.sqlite}"
       CHAOX_BACKEND_MODE: "${CHAOX_BACKEND_MODE:-sqlite}"
       CHAOX_SERVER_NAME: "${CHAOX_SERVER_NAME:-chaox-agent-server}"

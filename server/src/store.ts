@@ -92,6 +92,23 @@ function opKindForPermission(op: string): "create" | "update" | "delete" {
   return "create";
 }
 
+export const MAX_PREFERENCES_CHARS = 32_768;
+
+function isAppRecordReadable(state: AppStateRow | undefined, op?: string): boolean {
+  if (!state) return true;
+  const policy = parsePolicyFromRow(state);
+  if (state.permission === "disabled" || !policy.allowRead) {
+    return false;
+  }
+  if (op) {
+    const domain = OP_DOMAIN_MAP[op];
+    if (domain && !policy.allowedDomains.includes(domain)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 export class ExchangeStore {
   readonly bx: BxOperations;
   readonly sx: SxOperations;
@@ -345,7 +362,16 @@ export class ExchangeStore {
     app?: AgentAppID;
     requestId?: string;
     receiptLimit?: number;
+    allowedApps?: AgentAppID[];
   } = {}): Promise<Record<string, unknown>> {
+    const allowedAppSet = options.allowedApps?.length ? new Set(options.allowedApps) : null;
+    if (options.app) {
+      const requestedApp = ExchangeStore.parseAppId(options.app);
+      if (allowedAppSet && !allowedAppSet.has(requestedApp)) {
+        throw new Error(`App '${requestedApp}' is excluded by this endpoint's 'apps' scope.`);
+      }
+    }
+
     const [appStateRes, datasetRes, inboxCountsRes, activeWuxuCount, prefs, receiptInfo] = await Promise.all([
       this.db
         .prepare(
@@ -378,9 +404,15 @@ export class ExchangeStore {
       countsByApp[ds.app][ds.domain] = ds.record_count;
     }
 
+    const stateByApp = new Map<AgentAppID, AppStateRow>();
     const apps: Record<string, unknown> = {};
     let latestUpdate: string | null = null;
     for (const row of appStateRes.results) {
+      const fullRow: AppStateRow = { ...row, catalog_json: null, summary_json: null };
+      stateByApp.set(row.app as AgentAppID, fullRow);
+      if (allowedAppSet && !allowedAppSet.has(row.app as AgentAppID)) {
+        continue;
+      }
       if (!latestUpdate || row.updated_at > latestUpdate) {
         latestUpdate = row.updated_at;
       }
@@ -388,7 +420,6 @@ export class ExchangeStore {
       if (row.app === "csteix") {
         datasetCounts.wuxu = activeWuxuCount;
       }
-      const fullRow: AppStateRow = { ...row, catalog_json: null, summary_json: null };
       apps[row.app] = {
         app: row.app,
         bundleId: row.bundle_id,
@@ -401,6 +432,25 @@ export class ExchangeStore {
         pendingInboxCount: pendingCounts[row.app] ?? 0
       };
     }
+
+    const filterAllowedReadable = <T extends { app: AgentAppID; op: string }>(items: T[]): T[] =>
+      items.filter(
+        (item) =>
+          (!allowedAppSet || allowedAppSet.has(item.app)) &&
+          isAppRecordReadable(stateByApp.get(item.app), item.op)
+      );
+
+    const visiblePendingInbox: Record<string, number> = allowedAppSet
+      ? Object.fromEntries(
+          (["sx", "bx", "csteix"] as const)
+            .filter((app) => allowedAppSet.has(app))
+            .map((app) => [app, pendingCounts[app]])
+        )
+      : {
+          sx: pendingCounts.sx,
+          bx: pendingCounts.bx,
+          csteix: pendingCounts.csteix
+        };
 
     const hasCustomPreferences = prefs.updatedAt !== null;
     const truncatedPrefs =
@@ -417,13 +467,9 @@ export class ExchangeStore {
       hasCustomPreferences,
       ...(hasCustomPreferences ? { preferences: truncatedPrefs } : {}),
       apps,
-      pendingInbox: {
-        sx: pendingCounts.sx,
-        bx: pendingCounts.bx,
-        csteix: pendingCounts.csteix
-      },
-      matchedPending: options.requestId ? receiptInfo.pending : undefined,
-      recentReceipts: receiptInfo.receipts
+      pendingInbox: visiblePendingInbox,
+      matchedPending: options.requestId ? filterAllowedReadable(receiptInfo.pending) : undefined,
+      recentReceipts: filterAllowedReadable(receiptInfo.receipts)
     };
   }
 
@@ -950,12 +996,22 @@ export class ExchangeStore {
     };
   }
 
-  async listPending(options: { app?: AgentAppID } = {}): Promise<Record<string, unknown>> {
-    const rows = options.app
+  async listPending(options: { app?: AgentAppID; allowedApps?: AgentAppID[] } = {}): Promise<Record<string, unknown>> {
+    const allowedAppSet = options.allowedApps?.length ? new Set(options.allowedApps) : null;
+    let parsedApp: AgentAppID | undefined;
+    if (options.app) {
+      parsedApp = ExchangeStore.parseAppId(options.app);
+      if (allowedAppSet && !allowedAppSet.has(parsedApp)) {
+        throw new Error(`App '${parsedApp}' is excluded by this endpoint's 'apps' scope.`);
+      }
+      await this.assertReadAccess(parsedApp);
+    }
+
+    const rows = parsedApp
       ? (
           await this.db
             .prepare("SELECT * FROM inbox WHERE app = ? ORDER BY created_at ASC, rowid ASC")
-            .bind(ExchangeStore.parseAppId(options.app))
+            .bind(parsedApp)
             .all<InboxRow>()
         ).results
       : (
@@ -964,12 +1020,24 @@ export class ExchangeStore {
             .all<InboxRow>()
         ).results;
 
+    const distinctApps = Array.from(new Set(rows.map((r) => r.app as AgentAppID)));
+    const statePairs = await Promise.all(
+      distinctApps.map(async (app) => [app, await this.getAppState(app)] as const)
+    );
+    const stateByApp = new Map<AgentAppID, AppStateRow | null>(statePairs);
+
+    const visibleRows = rows.filter((row) => {
+      const rowApp = row.app as AgentAppID;
+      if (allowedAppSet && !allowedAppSet.has(rowApp)) return false;
+      return isAppRecordReadable(stateByApp.get(rowApp) ?? undefined, row.op);
+    });
+
     const [sxTz, bxTz] = await Promise.all([
-      rows.some((r) => r.app === "sx") ? this.readAppTimeZone("sx") : Promise.resolve(undefined),
-      rows.some((r) => r.app === "bx") ? this.readAppTimeZone("bx") : Promise.resolve(undefined)
+      visibleRows.some((r) => r.app === "sx") ? this.readAppTimeZone("sx") : Promise.resolve(undefined),
+      visibleRows.some((r) => r.app === "bx") ? this.readAppTimeZone("bx") : Promise.resolve(undefined)
     ]);
 
-    const items = rows.map((row) => {
+    const items = visibleRows.map((row) => {
       const env = mapInboxRow(row);
       let resolvedLocalTime: Record<string, unknown> | undefined;
       if (env.app === "sx" && typeof env.payload.date === "string") {
@@ -1007,8 +1075,12 @@ export class ExchangeStore {
     };
   }
 
-  async cancelPending(requestIdInput: string): Promise<Record<string, unknown>> {
+  async cancelPending(
+    requestIdInput: string,
+    options: { allowedApps?: AgentAppID[] } = {}
+  ): Promise<Record<string, unknown>> {
     const cleanId = requireNonEmptyString(requestIdInput, "requestId");
+    const allowedAppSet = options.allowedApps?.length ? new Set(options.allowedApps) : null;
     const row = await this.db
       .prepare("SELECT * FROM inbox WHERE request_id = ?")
       .bind(cleanId)
@@ -1020,6 +1092,9 @@ export class ExchangeStore {
         .bind(cleanId)
         .first<ReceiptRow>();
       if (receiptRow) {
+        if (allowedAppSet && !allowedAppSet.has(receiptRow.app as AgentAppID)) {
+          throw new Error(`Pending request '${cleanId}' was not found in inbox.`);
+        }
         const receipt = mapReceiptRow(receiptRow);
         const recordHint = receipt.recordId ? ` (recordId: ${receipt.recordId})` : "";
         throw new Error(
@@ -1030,6 +1105,9 @@ export class ExchangeStore {
     }
 
     const app = ExchangeStore.parseAppId(row.app);
+    if (allowedAppSet && !allowedAppSet.has(app)) {
+      throw new Error(`App '${app}' is excluded by this endpoint's 'apps' scope.`);
+    }
     const state = await this.getAppState(app);
     if (state) {
       const policy = parsePolicyFromRow(state);
@@ -1571,6 +1649,11 @@ export class ExchangeStore {
   }
 
   async setPreferences(content: string): Promise<{ updatedAt: string }> {
+    if (content.length > MAX_PREFERENCES_CHARS) {
+      throw new Error(
+        `Preferences content exceeds maximum length of ${MAX_PREFERENCES_CHARS} characters.`
+      );
+    }
     const updatedAt = new Date().toISOString();
     await this.db
       .prepare("INSERT OR REPLACE INTO preferences (key, value, updated_at) VALUES ('user_preferences', ?, ?)")

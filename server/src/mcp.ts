@@ -3,7 +3,7 @@ import {
   MCP_SERVER_INSTRUCTIONS,
   SKILL_GUIDE_MARKDOWN
 } from "./guide.js";
-import { HttpError } from "./app.js";
+import { HttpError, isInternalError } from "./app.js";
 import { McpToolDefinition, TOOL_DEFINITIONS } from "./mcp-tools.js";
 import { ExchangeStore } from "./store.js";
 import { AgentAppID } from "./types.js";
@@ -15,17 +15,24 @@ const SUPPORTED_PROTOCOL_VERSIONS = [
   "2024-11-05"
 ];
 const DEFAULT_PROTOCOL_VERSION = "2025-03-26";
+const MAX_JSON_RPC_BATCH = 25;
 
 export interface McpScope {
   apps?: Set<AgentAppID>;
   readOnly: boolean;
+  allowPreferencesWrite: boolean;
+}
+
+export interface McpRequestOptions {
+  forceReadOnly?: boolean;
+  allowPreferencesWrite?: boolean;
 }
 
 const TOOL_BY_NAME = new Map<string, McpToolDefinition>(
   TOOL_DEFINITIONS.map((tool) => [tool.name, tool])
 );
 
-function parseMcpScope(url: URL): McpScope {
+function parseMcpScope(url: URL, options: McpRequestOptions = {}): McpScope {
   const rawApps = url.searchParams.get("apps")?.trim();
   let apps: Set<AgentAppID> | undefined;
   if (rawApps) {
@@ -45,11 +52,16 @@ function parseMcpScope(url: URL): McpScope {
   }
 
   const rawReadOnly = url.searchParams.get("readonly")?.trim().toLowerCase() ?? "";
-  const readOnly = rawReadOnly === "1" || rawReadOnly === "true" || rawReadOnly === "yes";
-  return { apps, readOnly };
+  const readOnly =
+    Boolean(options.forceReadOnly) || rawReadOnly === "1" || rawReadOnly === "true" || rawReadOnly === "yes";
+  const allowPreferencesWrite = !readOnly && options.allowPreferencesWrite !== false;
+  return { apps, readOnly, allowPreferencesWrite };
 }
 
 function isToolAllowedInScope(tool: McpToolDefinition, scope: McpScope): boolean {
+  if (tool.name === "chaox_update_preferences" && !scope.allowPreferencesWrite) {
+    return false;
+  }
   if (scope.readOnly && tool.annotations?.readOnlyHint !== true) {
     return false;
   }
@@ -62,7 +74,7 @@ function isToolAllowedInScope(tool: McpToolDefinition, scope: McpScope): boolean
 }
 
 function toolsForScope(scope: McpScope): McpToolDefinition[] {
-  if (!scope.apps && !scope.readOnly) {
+  if (!scope.apps && !scope.readOnly && scope.allowPreferencesWrite) {
     return TOOL_DEFINITIONS;
   }
   return TOOL_DEFINITIONS.filter((tool) => isToolAllowedInScope(tool, scope));
@@ -99,9 +111,16 @@ function toolJson(value: unknown) {
 }
 
 function toolError(error: unknown) {
+  let message: string;
+  if (isInternalError(error)) {
+    console.error("[chaox-agent] Internal MCP error:", error);
+    message = "Internal server error";
+  } else {
+    message = error instanceof Error ? error.message : String(error);
+  }
   return {
     isError: true,
-    content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }]
+    content: [{ type: "text", text: message }]
   };
 }
 
@@ -131,16 +150,17 @@ async function dispatchTool(
   args: Record<string, unknown>,
   scope: McpScope
 ): Promise<unknown> {
+  const allowedApps = scope.apps ? Array.from(scope.apps) : undefined;
   switch (name) {
     case "chaox_get_status":
       return store.getStatus({
         app: args.app as AgentAppID | undefined,
         requestId: optStr(args, "requestId"),
-        receiptLimit: optNum(args, "receiptLimit")
+        receiptLimit: optNum(args, "receiptLimit"),
+        allowedApps
       });
     case "chaox_get_briefing": {
       const requestedApps = optStrArr(args, "apps");
-      const scopedApps = scope.apps ? Array.from(scope.apps) : undefined;
       if (requestedApps && scope.apps) {
         const disallowed = requestedApps.filter((a) => !scope.apps!.has(a as AgentAppID));
         if (disallowed.length > 0) {
@@ -149,15 +169,16 @@ async function dispatchTool(
       }
       return store.getBriefing({
         date: optStr(args, "date"),
-        apps: requestedApps ?? scopedApps
+        apps: requestedApps ?? allowedApps
       });
     }
     case "chaox_list_pending":
       return store.listPending({
-        app: optStr(args, "app") as AgentAppID | undefined
+        app: optStr(args, "app") as AgentAppID | undefined,
+        allowedApps
       });
     case "chaox_cancel_pending":
-      return store.cancelPending(String(args.requestId ?? ""));
+      return store.cancelPending(String(args.requestId ?? ""), { allowedApps });
     case "chaox_get_preferences":
       return store.getPreferences();
     case "chaox_update_preferences":
@@ -829,7 +850,7 @@ async function handleSingleRpc(
       if (toolDef && !isToolAllowedInScope(toolDef, scope)) {
         return rpcResult(
           id,
-          toolError(`Tool '${toolName}' is not available on this scoped MCP endpoint.`)
+          toolError(new Error(`Tool '${toolName}' is not available on this scoped MCP endpoint.`))
         );
       }
       const args =
@@ -864,14 +885,17 @@ async function handleSingleRpc(
 
     case "resources/templates/list":
       return rpcResult(id, {
-        resourceTemplates: [
-          {
-            uriTemplate: "chaox://wuxu/{slug}",
-            name: "CSTEIX Wuxu Article",
-            description: "Read a private CSTEIX Wuxu article as Markdown by lowercase kebab-case slug",
-            mimeType: "text/markdown"
-          }
-        ]
+        resourceTemplates:
+          !scope.apps || scope.apps.has("csteix")
+            ? [
+                {
+                  uriTemplate: "chaox://wuxu/{slug}",
+                  name: "CSTEIX Wuxu Article",
+                  description: "Read a private CSTEIX Wuxu article as Markdown by lowercase kebab-case slug",
+                  mimeType: "text/markdown"
+                }
+              ]
+            : []
       });
 
     case "resources/read": {
@@ -888,6 +912,13 @@ async function handleSingleRpc(
         });
       }
       if (uri.startsWith("chaox://wuxu/")) {
+        if (scope.apps && !scope.apps.has("csteix")) {
+          return rpcError(
+            id,
+            -32602,
+            "Resource 'chaox://wuxu/...' is excluded by this endpoint's 'apps' scope."
+          );
+        }
         const slug = decodeURIComponent(uri.slice("chaox://wuxu/".length).trim());
         if (!slug) {
           return rpcError(id, -32602, "Missing Wuxu slug in resource URI.");
@@ -922,6 +953,10 @@ async function handleSingleRpc(
             contents: [{ uri, mimeType: "text/markdown", text: lines.join("\n") }]
           });
         } catch (error) {
+          if (isInternalError(error)) {
+            console.error("[chaox-agent] Internal MCP resource error:", error);
+            return rpcError(id, -32603, "Internal server error");
+          }
           return rpcError(id, -32602, error instanceof Error ? error.message : String(error));
         }
       }
@@ -1012,7 +1047,11 @@ async function handleSingleRpc(
   }
 }
 
-export async function handleMcpRequest(request: Request, store: ExchangeStore): Promise<Response> {
+export async function handleMcpRequest(
+  request: Request,
+  store: ExchangeStore,
+  options: McpRequestOptions = {}
+): Promise<Response> {
   if (request.method !== "POST") {
     return jsonResponse(
       { error: "Method not allowed. Send JSON-RPC requests with POST /mcp." },
@@ -1020,7 +1059,7 @@ export async function handleMcpRequest(request: Request, store: ExchangeStore): 
     );
   }
 
-  const scope = parseMcpScope(new URL(request.url));
+  const scope = parseMcpScope(new URL(request.url), options);
 
   let parsed: unknown;
   try {
@@ -1030,6 +1069,16 @@ export async function handleMcpRequest(request: Request, store: ExchangeStore): 
   }
 
   if (Array.isArray(parsed)) {
+    if (parsed.length === 0) {
+      return rpcError(null, -32600, "Invalid Request: empty JSON-RPC batch");
+    }
+    if (parsed.length > MAX_JSON_RPC_BATCH) {
+      return rpcError(
+        null,
+        -32600,
+        `JSON-RPC batch size exceeds maximum of ${MAX_JSON_RPC_BATCH}.`
+      );
+    }
     const responses: unknown[] = [];
     for (const item of parsed) {
       if (!item || typeof item !== "object" || typeof (item as JsonRpcRequest).method !== "string") {

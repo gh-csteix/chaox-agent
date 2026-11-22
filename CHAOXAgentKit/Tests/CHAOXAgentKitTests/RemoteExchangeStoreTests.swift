@@ -82,6 +82,18 @@ struct RemoteExchangeStoreTests {
         await #expect(throws: AgentExchangeError.self) {
             try await store.saveRemoteConfiguration(urlString: "http://example.com", token: "abc")
         }
+        #expect(throws: AgentExchangeError.self) {
+            _ = try AgentExchangeStore.normalizedRemoteURL("https://user:pass@example.com")
+        }
+        #expect(throws: AgentExchangeError.self) {
+            _ = try AgentExchangeStore.normalizedRemoteURL("https://user@example.com")
+        }
+
+        let defaultStore = AgentExchangeStore(app: .sx, inMemoryTokenStorage: true)
+        let defaultConfig = await defaultStore.urlSession.configuration
+        #expect(defaultConfig.urlCache == nil)
+        #expect(defaultConfig.httpCookieStorage == nil)
+        #expect(defaultConfig.httpShouldSetCookies == false)
 
         let stripped = try? AgentExchangeStore.normalizedRemoteURL("https://my.workers.dev/mcp/")
         #expect(stripped?.absoluteString == "https://my.workers.dev")
@@ -104,6 +116,8 @@ struct RemoteExchangeStoreTests {
         let serverState = ServerState()
 
         StubURLProtocol.handler = { req, body in
+            #expect(req.cachePolicy == .reloadIgnoringLocalCacheData)
+            #expect(req.httpShouldHandleCookies == false)
             let path = req.url?.path ?? ""
             let auth = req.value(forHTTPHeaderField: "Authorization")
 
@@ -403,6 +417,8 @@ struct RemoteExchangeStoreTests {
         let serverState = ServerState()
 
         StubURLProtocol.handler = { req, body in
+            #expect(req.cachePolicy == .reloadIgnoringLocalCacheData)
+            #expect(req.httpShouldHandleCookies == false)
             let path = req.url?.path ?? ""
             let method = req.httpMethod ?? "GET"
 

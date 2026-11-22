@@ -93,13 +93,29 @@ Put Nginx, Caddy, or Tailscale TLS termination in front of `127.0.0.1:8787`.
 
 | Variable | Default | Description |
 |---|---|---|
-| `CHAOX_AUTH_TOKEN` | *(empty — routes fail closed with `401`)* | Shared Bearer secret for SX, BX, CSTEIX, and AI MCP clients. |
+| `CHAOX_AUTH_TOKEN` | *(empty — routes fail closed with `401`)* | Shared full-access Bearer secret for iOS sync and AI MCP clients. |
+| `CHAOX_SYNC_TOKEN` | *(unset)* | Optional iOS-only sync token (`/sync/*`, `GET`/`PUT /preferences`; returns `403` on `/mcp`). |
+| `CHAOX_MCP_TOKEN` | *(unset)* | Optional AI-only MCP token (`/mcp`, `GET /preferences`; returns `403` on `/sync/*` and `PUT /preferences`). |
+| `CHAOX_MCP_READONLY_TOKEN` | *(unset)* | Optional read-only AI token (forces server-side `readonly` on `/mcp` and `403` on `/sync/*`). |
+| `CHAOX_ALLOWED_ORIGINS` | `*` | Comma-separated browser `Origin` allowlist (`403` on mismatch; non-browser clients without `Origin` stay allowed). |
+| `CHAOX_ALLOW_MCP_PREFERENCES_WRITE` | `true` | Set `false` to block `chaox_update_preferences` over MCP while keeping `PUT /preferences` via sync token. |
+| `CHAOX_TRUST_PROXY` | `false` | Set `true` only behind a trusted reverse proxy to honor `X-Forwarded-For/Proto/Host` for rate limiting & URL reconstruction. |
 | `HOST` | `0.0.0.0` | Listen address inside Node / container. |
 | `PORT` | `8787` | HTTP listen port (`0..65535`). |
 | `CHAOX_DB_PATH` | `./data/chaox-agent.sqlite` | SQLite database file path (WAL mode, auto-migrated on startup). |
 | `CHAOX_BACKEND_MODE` | `sqlite` | Reported in `GET /health` `mode` and `chaox_get_status.backend`. |
 | `CHAOX_SERVER_NAME` | `chaox-agent-server` | Reported in MCP `initialize.serverInfo.name` and inbox `source.client`. |
-| `CHAOX_MAX_BODY_BYTES` | `20971520` (20 MiB) | Maximum accepted HTTP request body size (`413` above limit). |
+| `CHAOX_MAX_BODY_BYTES` | `20971520` (20 MiB) | Maximum accepted `/sync/*` HTTP request body size (`/mcp` and `/preferences` are capped at `2 MiB`, `413` above limit). |
+
+---
+
+## Security Hardening (Optional & Backward Compatible)
+
+`CHAOX_AUTH_TOKEN` continues to work everywhere with zero setup changes. When you want tighter isolation:
+
+1. **Zero-downtime token separation**: Add `CHAOX_SYNC_TOKEN` (for SX/BX/CSTEIX iOS settings) and `CHAOX_MCP_TOKEN` (or `CHAOX_MCP_READONLY_TOKEN` for read-only assistants) while keeping `CHAOX_AUTH_TOKEN` active during migration. Once all apps and clients are updated, remove `CHAOX_AUTH_TOKEN`. An MCP token cannot alter app policies on `/sync/*`, hard-wipe `/sync/csteix/data`, or forge `/sync/*/ack`.
+2. **Prevent persistent prompt injection via preferences**: Set `CHAOX_ALLOW_MCP_PREFERENCES_WRITE=false` once your routing preferences are settled, so untrusted external inputs cannot append hidden rules via `chaox_update_preferences`.
+3. **Restrict host SQLite permissions**: On a VPS, tighten directory permissions on the persisted SQLite folder (`chmod 700 ./data`). `docker-compose.yml` already runs the server container with a read-only root filesystem, `cap_drop: [ALL]`, and `no-new-privileges:true`.
 
 ---
 

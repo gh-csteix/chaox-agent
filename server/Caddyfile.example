@@ -1,4 +1,10 @@
 # Copy to Caddyfile and replace agent.example.com with your DNS A/AAAA domain pointing to this VPS.
 agent.example.com {
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "no-referrer"
+        -Server
+    }
     reverse_proxy chaox-agent:8787
 }
