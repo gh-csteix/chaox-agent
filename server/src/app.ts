@@ -301,7 +301,16 @@ export async function handleRequest(request: Request, env: ServerEnv): Promise<R
       if (action === "status" && request.method === "GET") {
         const rawLimit = Number(url.searchParams.get("limit") || "10");
         const limit = Number.isFinite(rawLimit) ? rawLimit : 10;
-        return jsonResponse(await store.getAppSyncStatus(app, limit), 200, cors.headers);
+        const tokenMode: "split" | "legacy" =
+          authRole === "sync" ||
+          Boolean(env.CHAOX_MCP_TOKEN?.trim() || env.CHAOX_MCP_READONLY_TOKEN?.trim())
+            ? "split"
+            : "legacy";
+        return jsonResponse(
+          { ...(await store.getAppSyncStatus(app, limit)), tokenMode },
+          200,
+          cors.headers
+        );
       }
 
       if (action === "inbox" && request.method === "GET") {

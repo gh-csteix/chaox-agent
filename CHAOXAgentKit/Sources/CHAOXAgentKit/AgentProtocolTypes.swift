@@ -555,6 +555,11 @@ public struct AgentInboxRunResult: Sendable, Equatable {
     }
 }
 
+public enum AgentTokenMode: String, Codable, Sendable, Equatable {
+    case legacy
+    case split
+}
+
 public struct AgentExchangeStatus: Sendable, Equatable {
     public var isConfigured: Bool
     public var permission: AgentPermissionTier
@@ -564,6 +569,7 @@ public struct AgentExchangeStatus: Sendable, Equatable {
     public var recentReceipts: [AgentReceipt]
     public var lastError: String?
     public var remoteEndpointURL: String?
+    public var tokenMode: AgentTokenMode
 
     public var attentionReceiptCount: Int {
         self.recentReceipts.prefix(6).count { receipt in
@@ -583,7 +589,8 @@ public struct AgentExchangeStatus: Sendable, Equatable {
         pendingInboxCount: Int = 0,
         recentReceipts: [AgentReceipt] = [],
         lastError: String? = nil,
-        remoteEndpointURL: String? = nil
+        remoteEndpointURL: String? = nil,
+        tokenMode: AgentTokenMode = .legacy
     ) {
         self.isConfigured = isConfigured
         self.permission = permission
@@ -597,6 +604,7 @@ public struct AgentExchangeStatus: Sendable, Equatable {
         self.recentReceipts = recentReceipts
         self.lastError = lastError
         self.remoteEndpointURL = remoteEndpointURL
+        self.tokenMode = tokenMode
     }
 }
 
@@ -647,6 +655,7 @@ public struct AgentRemoteStatusResponse: Codable, Sendable, Equatable {
     public var lastSyncAt: Date?
     public var pendingInboxCount: Int
     public var recentReceipts: [AgentReceipt]
+    public var tokenMode: AgentTokenMode?
 
     public init(
         schemaVersion: String = AgentProtocolConstants.schemaVersion,
@@ -655,7 +664,8 @@ public struct AgentRemoteStatusResponse: Codable, Sendable, Equatable {
         permission: AgentPermissionTier,
         lastSyncAt: Date? = nil,
         pendingInboxCount: Int = 0,
-        recentReceipts: [AgentReceipt] = []
+        recentReceipts: [AgentReceipt] = [],
+        tokenMode: AgentTokenMode? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.app = app
@@ -664,6 +674,7 @@ public struct AgentRemoteStatusResponse: Codable, Sendable, Equatable {
         self.lastSyncAt = lastSyncAt
         self.pendingInboxCount = pendingInboxCount
         self.recentReceipts = recentReceipts
+        self.tokenMode = tokenMode
     }
 }
 

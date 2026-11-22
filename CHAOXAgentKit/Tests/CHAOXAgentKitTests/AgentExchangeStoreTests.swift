@@ -69,6 +69,16 @@ struct AgentExchangeStoreTests {
 
         #expect(AgentEndpointParser.mcpConfigSnippet(for: "http://example.com", token: "tok") == nil)
         #expect(AgentEndpointParser.mcpConfigSnippet(for: "not a url", token: "tok") == nil)
+
+        let splitSnippet = try #require(
+            AgentEndpointParser.mcpConfigSnippet(
+                for: "https://agent.example.com/mcp",
+                token: "sync-secret-should-not-leak",
+                tokenMode: .split
+            )
+        )
+        #expect(!splitSnippet.contains("sync-secret-should-not-leak"))
+        #expect(splitSnippet.contains(AgentEndpointParser.splitMCPTokenPlaceholder))
     }
 
     @Test("AgentEndpointParser builds and round-trips concise client config snippets")
@@ -390,6 +400,8 @@ struct AgentExchangeStoreTests {
                 #expect(prompt.contains("URL: https://"))
                 #expect(prompt.contains("Token:"))
                 #expect(prompt.contains("mcpServers"))
+                #expect(prompt.contains("CHAOX_SYNC_TOKEN"))
+                #expect(prompt.contains("CHAOX_MCP_TOKEN"))
             }
 
             #expect(enPrompt != zhPrompt)

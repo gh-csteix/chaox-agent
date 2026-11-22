@@ -211,6 +211,42 @@ struct RemoteExchangeStoreTests {
         #expect(cachedStatus.isConfigured)
         #expect(cachedStatus.remoteEndpointURL == "https://chaox.workers.dev")
         #expect(cachedStatus.permission == .appendOnly)
+        #expect(cachedStatus.tokenMode == .legacy)
+    }
+
+    @Test("loadStatus persists split tokenMode and resets it on clearRemoteConfiguration")
+    func statusPersistsSplitTokenModeAndResetsOnClear() async throws {
+        let store = AgentExchangeStore(
+            app: .sx,
+            defaultsSuiteName: "RemoteTests.\(UUID().uuidString)",
+            urlSession: self.makeStubSession(),
+            inMemoryTokenStorage: true
+        )
+        StubURLProtocol.handler = { req, _ in
+            guard req.url?.path == "/sync/sx/status" else {
+                return (200, Data(#"{"status":"ok"}"#.utf8))
+            }
+            let status = AgentRemoteStatusResponse(
+                app: .sx,
+                configured: true,
+                permission: .readWrite,
+                pendingInboxCount: 0,
+                recentReceipts: [],
+                tokenMode: .split
+            )
+            return (200, try AgentJSONCoding.encoder.encode(status))
+        }
+
+        try await store.saveRemoteConfiguration(urlString: "https://agent.example.com", token: "sync-only-tok")
+        let loaded = await store.loadStatus()
+        #expect(loaded.tokenMode == .split)
+        let cached = await store.cachedStatus()
+        #expect(cached.tokenMode == .split)
+
+        await store.clearRemoteConfiguration()
+        let cleared = await store.cachedStatus()
+        #expect(!cleared.isConfigured)
+        #expect(cleared.tokenMode == .legacy)
     }
 
     @Test("cachedStatus returns offline configuration without network calls")

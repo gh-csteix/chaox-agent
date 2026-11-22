@@ -4,42 +4,46 @@
 
 请先询问我想用 **方案 A（免费免卡 Cloudflare，推荐免运维）** 还是 **方案 B（完全不依赖 Cloudflare 的自建部署）**，然后一步步指导我完成（若当前环境可直接执行命令，也请直接替我操作）：
 
+### 密钥隔离建议（默认采用双密钥）
+- **`CHAOX_SYNC_TOKEN`**：仅填写在手机 App（SX / BX / CSTEIX）中，用于设备同步与权限策略上传（服务端禁止该令牌访问 `/mcp`）。
+- **`CHAOX_MCP_TOKEN`**：仅填写在 AI 客户端中，用于调用 MCP 工具（服务端禁止该令牌访问 `/sync/*` 控制面）。
+
 ### 方案 A — Cloudflare Workers + D1（推荐：免费、无需信用卡、免运维）
 - 进入仓库 `cloudflare-worker/` 执行 `npm install && npx wrangler login`（打开浏览器让我完成一次 Cloudflare 登录授权）。
-- 执行 `npm run setup` 自动创建 D1 数据库、应用 `../server/migrations` 表结构、生成 `CHAOX_AUTH_TOKEN`、部署并校验 `/health` 与 `/mcp`。
+- 执行 `npm run setup` 自动创建 D1 数据库、应用 `../server/migrations` 表结构、生成并配置 `CHAOX_SYNC_TOKEN` 与 `CHAOX_MCP_TOKEN`、部署并校验 `/health`、`/sync/sx/status` 与 `/mcp`。
 - 提示：如果我在中国大陆使用手机蜂窝网络，默认 `*.workers.dev` 域名可能受限，如我有域名可顺便指导我在 Cloudflare 后台绑定自定义子域名。
 
 ### 方案 B — 自建 Docker / Node 22.13+ SQLite（不依赖 Cloudflare）
 1. **公网 VPS + 域名（Docker Compose + Caddy 自动 HTTPS）**：
    - 将域名解析到 VPS 并开放 80/443 端口；
-   - 进入 `server/`，复制 `.env.example` 为 `.env`（用 `openssl rand -hex 32` 生成 `CHAOX_AUTH_TOKEN`），复制 `Caddyfile.example` 为 `Caddyfile` 填好域名；
+   - 进入 `server/`，复制 `.env.example` 为 `.env`（用 `openssl rand -hex 32` 分别生成 `CHAOX_SYNC_TOKEN` 与 `CHAOX_MCP_TOKEN`），复制 `Caddyfile.example` 为 `Caddyfile` 填好域名；
    - 执行 `docker compose --profile caddy up -d --build`。
 2. **Mac mini / NAS / 家用主机（Tailscale 内网或公网 HTTPS）**：
    - 进入 `server/` 执行 `docker compose up -d --build`（默认仅监听 `127.0.0.1:8787`）；
    - 执行 `tailscale serve --bg http://127.0.0.1:8787`（仅个人 Tailscale 设备可达），如需云端 AI 客户端访问则用 `tailscale funnel --bg http://127.0.0.1:8787`。
 3. **容器 PaaS 平台（Fly.io / Zeabur / Railway）**：
-   - 使用 `server/Dockerfile` 部署，挂载持久化卷到 `/data`，配置 `CHAOX_AUTH_TOKEN`，暴露 `8787` 端口，健康检查 `/health`。
+   - 使用 `server/Dockerfile` 部署，挂载持久化卷到 `/data`，配置 `CHAOX_SYNC_TOKEN` 与 `CHAOX_MCP_TOKEN`，暴露 `8787` 端口，健康检查 `/health`。
 4. **直接运行 Node.js（`>= 22.13.0`，零额外数据库依赖）**：
-   - 在 `server/` 执行 `npm install && npm run build && CHAOX_AUTH_TOKEN=<token> npm start`，前置 Caddy / Nginx / Tailscale HTTPS 反向代理。
+   - 在 `server/` 执行 `npm install && npm run build`，设置 `CHAOX_SYNC_TOKEN` 与 `CHAOX_MCP_TOKEN` 后 `npm start`，前置 Caddy / Nginx / Tailscale HTTPS 反向代理。
 
 ### 验收与最终输出
-- 验证 `GET https://<我的域名>/health` 返回 HTTP `200`（`status: "ok"`），且带 `Authorization: Bearer <token>` 调用 `POST https://<我的域名>/mcp`（`tools/list`）成功。
+- 验证 `GET https://<我的域名>/health` 返回 `200 ok`，且分别使用 `CHAOX_SYNC_TOKEN`（`/sync/sx/status` -> `200`）与 `CHAOX_MCP_TOKEN`（`/mcp` `tools/list` -> `200`，`/sync/*` -> `403`）校验权限隔离生效。
 - 完成后，请直接把下面两段配置发给我，方便我在 App 和 AI 客户端里一键复制使用：
 
-1. **{APP_NAME} 客户端配置**（支持在 App 设置页点「粘贴配置」自动识别）：
+1. **{APP_NAME} 客户端配置（使用 `CHAOX_SYNC_TOKEN`，支持在 App 设置页「粘贴配置」自动识别）**：
 ```
 URL: https://<我的域名>
-Token: <我的密钥>
+Token: <我的 CHAOX_SYNC_TOKEN>
 ```
 
-2. **AI 客户端 MCP 配置**：
+2. **AI 客户端 MCP 配置（使用 `CHAOX_MCP_TOKEN`）**：
 ```json
 {
   "mcpServers": {
     "chaox-agent": {
       "url": "https://<我的域名>/mcp",
       "headers": {
-        "Authorization": "Bearer <我的密钥>"
+        "Authorization": "Bearer <我的 CHAOX_MCP_TOKEN>"
       }
     }
   }

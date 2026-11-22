@@ -178,13 +178,19 @@ test("enforces privilege separation across CHAOX_SYNC_TOKEN, CHAOX_MCP_TOKEN, CH
   const roSyncBlocked = await sendReq(env, "/sync/sx/status", { token: mcpReadOnlyToken });
   assert.equal(roSyncBlocked.status, 403);
 
+  const syncStatusSplit = await sendReq(env, "/sync/sx/status", { token: syncToken });
+  assert.equal(syncStatusSplit.status, 200);
+  assert.equal(syncStatusSplit.data.tokenMode, "split");
+
   // Legacy CHAOX_AUTH_TOKEN continues to work across both /sync/* and /mcp for zero-friction upgrades.
   const legacyToken = "legacy-full-access-token-0123456789abcdef";
   const legacyEnv: ServerEnv = {
     DB: env.DB,
     CHAOX_AUTH_TOKEN: legacyToken
   };
-  assert.equal((await sendReq(legacyEnv, "/sync/sx/status", { token: legacyToken })).status, 200);
+  const legacyStatus = await sendReq(legacyEnv, "/sync/sx/status", { token: legacyToken });
+  assert.equal(legacyStatus.status, 200);
+  assert.equal(legacyStatus.data.tokenMode, "legacy");
   assert.equal(
     (
       await sendReq(legacyEnv, "/mcp", {

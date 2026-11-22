@@ -4,42 +4,46 @@ Repository: https://github.com/gh-csteix/chaox-agent
 
 First, ask me whether I want Option A (Cloudflare — recommended if I want free zero-server-upkeep hosting) or Option B (self-hosted without Cloudflare), then guide me step by step or run the commands for me:
 
+### Two-Key Security Design (Recommended Default)
+- **`CHAOX_SYNC_TOKEN`**: Used only inside my iPhone apps (SX / BX / CSTEIX) for syncing and policy updates (blocked with `403` on `/mcp`).
+- **`CHAOX_MCP_TOKEN`**: Used only inside AI MCP clients (blocked with `403` on all `/sync/*` control-plane routes).
+
 ### Option A — Cloudflare Workers + D1 (Recommended: Free, No Credit Card)
 - Run `cd cloudflare-worker && npm install && npx wrangler login` (pause so I can approve Cloudflare login in the browser).
-- Run `npm run setup` to create the D1 database, apply `../server/migrations`, generate `CHAOX_AUTH_TOKEN`, deploy, and verify `/health` + `/mcp`.
+- Run `npm run setup` to create the D1 database, apply `../server/migrations`, generate & set `CHAOX_SYNC_TOKEN` and `CHAOX_MCP_TOKEN`, deploy, and verify `/health`, `/sync/sx/status`, and `/mcp`.
 - Note: On Mainland China mobile networks, `*.workers.dev` can be throttled, so mention how to bind a custom subdomain in Cloudflare Dashboard if I own a domain.
 
 ### Option B — Self-Hosted Docker / Node 22.13+ + SQLite (No Cloudflare Required)
 1. **VPS + Domain (Docker Compose + automatic Caddy HTTPS)**:
    - Point DNS to the VPS and open ports 80/443.
-   - `cd server`, copy `.env.example` -> `.env` (generate a 64-char hex `CHAOX_AUTH_TOKEN`), copy `Caddyfile.example` -> `Caddyfile` with my domain.
+   - `cd server`, copy `.env.example` -> `.env` (generate two distinct 64-char hex keys for `CHAOX_SYNC_TOKEN` and `CHAOX_MCP_TOKEN`), copy `Caddyfile.example` -> `Caddyfile` with my domain.
    - Run `docker compose --profile caddy up -d --build`.
 2. **Mac mini / Home Server / NAS (Tailscale Serve or Funnel)**:
    - Run `cd server && docker compose up -d --build` (binds only to `127.0.0.1:8787`).
    - Run `tailscale serve --bg http://127.0.0.1:8787` (private to my tailnet) or `tailscale funnel --bg http://127.0.0.1:8787` (public HTTPS for cloud AI clients).
 3. **Container PaaS (Fly.io / Zeabur / Railway)**:
-   - Deploy `server/Dockerfile`, mount a persistent volume at `/data`, set `CHAOX_AUTH_TOKEN`, expose port `8787` (`/health`).
+   - Deploy `server/Dockerfile`, mount a persistent volume at `/data`, set `CHAOX_SYNC_TOKEN` and `CHAOX_MCP_TOKEN`, expose port `8787` (`/health`).
 4. **Bare Node.js `>= 22.13.0`**:
-   - Run `cd server && npm install && npm run build && CHAOX_AUTH_TOKEN=<token> npm start`, fronted by Nginx/Caddy/Tailscale HTTPS.
+   - Run `cd server && npm install && npm run build`, export `CHAOX_SYNC_TOKEN` and `CHAOX_MCP_TOKEN`, and run `npm start` behind Nginx/Caddy/Tailscale HTTPS.
 
 ### Verification & Final Output
-- Verify `GET https://<my-server>/health` returns HTTP `200` (`status: "ok"`) and `POST https://<my-server>/mcp` (`tools/list` with `Authorization: Bearer <token>`) succeeds.
+- Verify `GET https://<my-server>/health` returns HTTP `200` (`status: "ok"`), `CHAOX_SYNC_TOKEN` succeeds on `/sync/sx/status`, and `CHAOX_MCP_TOKEN` succeeds on `POST /mcp` (`tools/list`) while receiving `403` on `/sync/*`.
 - Finish by giving me two copy-ready blocks:
 
-1. **App Client Config** (for one-tap `Paste Config` in {APP_NAME}):
+1. **App Client Config (uses `CHAOX_SYNC_TOKEN`, works with one-tap `Paste Config` in {APP_NAME})**:
 ```
 URL: https://<my-server>
-Token: <my-bearer-token>
+Token: <my-CHAOX_SYNC_TOKEN>
 ```
 
-2. **AI MCP Client Config**:
+2. **AI MCP Client Config (uses `CHAOX_MCP_TOKEN`)**:
 ```json
 {
   "mcpServers": {
     "chaox-agent": {
       "url": "https://<my-server>/mcp",
       "headers": {
-        "Authorization": "Bearer <my-bearer-token>"
+        "Authorization": "Bearer <my-CHAOX_MCP_TOKEN>"
       }
     }
   }

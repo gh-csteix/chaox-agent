@@ -15,6 +15,7 @@ public actor AgentExchangeStore {
     var recentReceiptsKey: String { "\(self.keyPrefix).recentReceipts" }
     var remoteURLKey: String { "\(self.keyPrefix).remoteURL" }
     var remoteTokenAccount: String { "\(self.keyPrefix).remoteToken" }
+    var tokenModeKey: String { "\(self.keyPrefix).tokenMode" }
 
     private var legacyFolderBookmarkKey: String { "\(self.keyPrefix).folderBookmark" }
     private var legacyFolderNameKey: String { "\(self.keyPrefix).folderName" }
@@ -251,6 +252,7 @@ public actor AgentExchangeStore {
         store.removeObject(forKey: self.pendingInboxCountKey)
         store.removeObject(forKey: self.recentReceiptsKey)
         store.removeObject(forKey: self.policyKey)
+        store.removeObject(forKey: self.tokenModeKey)
         self.removeLegacyFolderDefaults(from: store)
         store.set(AgentPermissionTier.disabled.rawValue, forKey: self.permissionKey)
     }
@@ -284,8 +286,18 @@ public actor AgentExchangeStore {
             pendingInboxCount: isConfigured ? self.cachedPendingInboxCount(from: store) : 0,
             recentReceipts: isConfigured ? self.cachedReceipts(from: store) : [],
             lastError: store.string(forKey: self.lastErrorKey),
-            remoteEndpointURL: self.savedRemoteURLString()
+            remoteEndpointURL: self.savedRemoteURLString(),
+            tokenMode: isConfigured ? self.cachedTokenMode(from: store) : .legacy
         )
+    }
+
+    private func cachedTokenMode(from store: UserDefaults) -> AgentTokenMode {
+        guard let raw = store.string(forKey: self.tokenModeKey),
+              let mode = AgentTokenMode(rawValue: raw)
+        else {
+            return .legacy
+        }
+        return mode
     }
 
     public func publishSnapshot(
@@ -496,6 +508,8 @@ public actor AgentExchangeStore {
                 body: nil
             )
             let decoded = try AgentJSONCoding.decoder.decode(AgentRemoteStatusResponse.self, from: data)
+            let resolvedTokenMode = decoded.tokenMode ?? .legacy
+            store.set(resolvedTokenMode.rawValue, forKey: self.tokenModeKey)
             self.persistCachedStatus(
                 pendingInboxCount: decoded.pendingInboxCount,
                 recentReceipts: decoded.recentReceipts,
@@ -509,7 +523,8 @@ public actor AgentExchangeStore {
                 pendingInboxCount: decoded.pendingInboxCount,
                 recentReceipts: decoded.recentReceipts,
                 lastError: nil,
-                remoteEndpointURL: baseURL.absoluteString
+                remoteEndpointURL: baseURL.absoluteString,
+                tokenMode: resolvedTokenMode
             )
         } catch {
             let resolvedError = Self.isCancellationError(error) ? cachedError : error.localizedDescription
@@ -521,7 +536,8 @@ public actor AgentExchangeStore {
                 pendingInboxCount: self.cachedPendingInboxCount(from: store),
                 recentReceipts: self.cachedReceipts(from: store),
                 lastError: resolvedError,
-                remoteEndpointURL: baseURL.absoluteString
+                remoteEndpointURL: baseURL.absoluteString,
+                tokenMode: self.cachedTokenMode(from: store)
             )
         }
     }

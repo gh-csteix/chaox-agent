@@ -217,15 +217,27 @@ public enum AgentEndpointParser {
         )
     }
 
-    public static func mcpConfigSnippet(for urlString: String, token: String?) -> String? {
+    public static let splitMCPTokenPlaceholder = "<YOUR_CHAOX_MCP_TOKEN>"
+
+    public static func mcpConfigSnippet(
+        for urlString: String,
+        token: String?,
+        tokenMode: AgentTokenMode = .legacy
+    ) -> String? {
         guard let endpointURL = mcpEndpointString(for: urlString) else {
             return nil
         }
-        let trimmedToken = token?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let headers: [String: String]? = if let trimmedToken, !trimmedToken.isEmpty {
-            ["Authorization": "Bearer \(trimmedToken)"]
-        } else {
-            nil
+        let headers: [String: String]?
+        switch tokenMode {
+        case .split:
+            headers = ["Authorization": "Bearer \(Self.splitMCPTokenPlaceholder)"]
+        case .legacy:
+            let trimmedToken = token?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let trimmedToken, !trimmedToken.isEmpty {
+                headers = ["Authorization": "Bearer \(trimmedToken)"]
+            } else {
+                headers = nil
+            }
         }
 
         let payload = MCPConfigSnippet(

@@ -8,5 +8,6 @@ database_name = "chaox-agent"
 database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
 migrations_dir = "../server/migrations"
 
-# Set your bearer token as a Wrangler secret before deploying:
-# npx wrangler secret put CHAOX_AUTH_TOKEN
+# Set two separate bearer tokens as Wrangler secrets before deploying (or run `npm run setup`):
+# npx wrangler secret put CHAOX_SYNC_TOKEN
+# npx wrangler secret put CHAOX_MCP_TOKEN
