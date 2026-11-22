@@ -11,7 +11,7 @@
 
 All endpoints except `GET /health` require `Authorization: Bearer <token>`:
 - `GET /health`: Liveness probe returning `{ status: "ok", schemaVersion: "chaox-agent/v1", mode }`.
-- `POST /mcp`: Web-standard Streamable HTTP JSON-RPC 2.0 MCP endpoint (`tools/*`, `resources/*`, `prompts/*`).
+- `POST /mcp`: Web-standard Streamable HTTP JSON-RPC 2.0 MCP endpoint (`initialize` with protocol negotiation across `2025-11-25` / `2025-06-18` / `2025-03-26` / `2024-11-05`, `tools/*`, `resources/list`, `resources/templates/list`, `resources/read` including `chaox://wuxu/{slug}`, `prompts/*`). Supports optional query scoping: `?apps=sx,bx` to restrict exposed app tools and `?readonly=1` to restrict to read-only tools.
 - `GET /sync/:app/status?limit=N`: Returns `app`, `configured`, `permission`, `lastSyncAt`, `pendingInboxCount`, and `recentReceipts`.
 - `GET /sync/:app/inbox`: Returns pending `envelopes[]` ordered chronologically.
 - `POST /sync/:app/ack`: Atomically records `receipts[]` and deletes acknowledged `inbox` rows.
@@ -26,7 +26,7 @@ All endpoints except `GET /health` require `Authorization: Bearer <token>`:
 - `disabled`: App does not read from or write to the exchange endpoint.
 - `readOnly`: App exports `catalog` and `summary`; inbox writes are rejected with `errorCode: "permission_denied"`.
 - `appendOnly`: App exports snapshots and accepts create/idempotent-append operations (`record_expense`, `record_income`, `record_food`, `record_skin`, `record_toilet`).
-- `readWrite`: Full protocol access (currently identical capability set to `appendOnly`; reserved for non-destructive edits in future protocol revisions).
+- `readWrite`: Full granular read/create/update/delete capabilities governed per-app by the user's `PermissionPolicy` (`allowRead`, `allowCreate`, `allowUpdate`, `allowDelete`, `allowedDomains`).
 
 ## 4. App Snapshots
 
@@ -58,7 +58,8 @@ All endpoints except `GET /health` require `Authorization: Bearer <token>`:
 
 - **SX**: `record_expense` (`amount`, `projectName`, optional `currency`, `tags`, `note`, `date`, `stableID`), `record_income` (`amount`, `projectName`, optional `currency`, `tags`, `note`, `date`, `stableID`). Omitting `tags` inherits latest project tags; passing `[]` clears tags.
 - **BX**: `record_food` (`name`, optional `mealType`, optional `calories`, `recordedAt`, `stableID`), `record_skin` (`product`: `"sunscreen"|"moisturizer"|"bodyLotion"|"medicine"|"other"`, optional `name`, `recordedAt`, `stableID`), `record_toilet` (`kind`: `"bowel"|"urination"`, `stoolType` `1..7` required for `"bowel"`, optional `note`, `recordedAt`, `stableID`).
-- **Optimistic Overlay**: The server (`server/` / `cloudflare-worker/`) combines committed snapshots with pending `inbox` writes on `sx_get_summary` / `bx_get_summary` and `sx_list_*` / `bx_list_*`.
+- **Optimistic Overlay & Aggregates**: The server (`server/` / `cloudflare-worker/`) merges committed snapshots with pending `inbox` writes across `sx_get_summary` / `bx_get_summary` (scoped strictly to each target period/date in app timezone), `sx_list_*`, and `bx_list_*`, computes pre-pagination `aggregates` on expense/income/food/workout list responses, and supports editing/cancelling queued writes before iOS sync via `pendingRequestId`, `pending:<requestId>`, and `chaox_list_pending` / `chaox_cancel_pending`.
+- **Cross-App Ergonomics**: `chaox_get_briefing` returns a single-call cross-app daily snapshot + preferences + active catalogs; `chaox_get_preferences` / `chaox_update_preferences` manage persistent personal assistant routing rules.
 
 ## 6. CSTEIX (`ai.chaox.csteix`) & Private Wuxu Articles
 

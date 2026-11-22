@@ -19,10 +19,14 @@ Use the `chaox-agent` MCP server tools to read and manage permitted records for 
 
 ## Cross-App & CRUD Workflows
 
-- **Meal Photo + Expense**: Inspect `chaox_get_status`, `sx_get_catalog`, and `bx_get_summary`; estimate calories transparently if omitted; call `sx_record_expense` + `bx_record_food` with a matching `requestId` prefix.
-- **Edit or Delete Records**: Call `sx_list_*`, `bx_list_*`, or `csteix_list_wuxu` first to obtain exact IDs (`number` for SX, `UUID` string for BX, `id`/`slug` + `revision` for CSTEIX Wuxu), confirm destructive deletes if requested or ambiguous, then invoke `update_*` or `delete_*`.
+- **One-Shot Daily Context**: Call `chaox_get_briefing` first for a combined view of connected apps, today & month SX totals, active projects/tags, BX nutrition/sleep/workouts, CSTEIX summary, and custom rules.
+- **Remember User Rules**: Call `chaox_get_preferences` and `chaox_update_preferences` (`content` or `append`) whenever the user states lasting routing/accounting/workout preferences.
+- **Inspect or Fix Un-Synced Queue**: Use `chaox_list_pending`, pass `pendingRequestId` to `sx_update_expense`/`sx_delete_expense`/`sx_update_income`/`sx_delete_income` or `pending:<requestId>` to BX update/delete tools to edit/cancel before sync, or call `chaox_cancel_pending`.
+- **List Aggregates**: `sx_list_expenses`, `sx_list_incomes`, `bx_list_food`, and `bx_list_workouts` return pre-pagination `aggregates` over all matching records.
+- **Meal Photo + Expense**: Inspect `chaox_get_briefing` (or `chaox_get_status`, `sx_get_catalog`, `bx_get_summary`); estimate calories transparently if omitted; call `sx_record_expense` + `bx_record_food` with a matching `requestId` prefix. BX `recordedAt` accepts ISO-8601 with offset, local `YYYY-MM-DD HH:mm`, or `YYYY-MM-DD` (local noon in BX timezone).
+- **Edit or Delete Records**: Call `sx_list_*`, `bx_list_*`, or `csteix_list_wuxu` first to obtain exact IDs (`number` or `pendingRequestId` for SX, `UUID` or `pending:<requestId>` for BX, `id`/`slug` + `revision` for CSTEIX Wuxu), confirm destructive deletes if requested or ambiguous, then invoke `update_*` or `delete_*`.
 - **Workout Annotations**: Inspect workouts with `bx_list_workouts` and look up exercise keys/equipment with `bx_list_exercises`, then use `bx_add_workout_exercise`, `bx_update_workout_exercise`, `bx_reorder_workout_exercises`, `bx_delete_workout_exercise`, or `bx_update_workout_type`.
-- **Wuxu Articles**: Use lowercase kebab-case `slug`s, at least one dimension from `["chaos", "spacetime", "existence", "ix"]`, pure body Markdown in `bodyZh` (without the `# Title` header skeleton), verbatim user lines in `rawNotes`, `expectedRevision` on edits, and `appendBodyZh`/`appendRawNotes` for same-day continuations.
+- **Wuxu Articles**: Use lowercase kebab-case `slug`s, at least one dimension from `["chaos", "spacetime", "existence", "ix"]`, pure body Markdown in `bodyZh` (without the `# Title` header skeleton), verbatim user lines in `rawNotes`, `expectedRevision` on edits, and `appendBodyZh`/`appendRawNotes` for same-day continuations (also readable via `chaox://wuxu/{slug}`).
 
 ## SX Expense & Income Field Reference
 

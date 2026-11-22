@@ -3,11 +3,70 @@ import {
   MCP_SERVER_INSTRUCTIONS,
   SKILL_GUIDE_MARKDOWN
 } from "./guide.js";
-import { TOOL_DEFINITIONS } from "./mcp-tools.js";
+import { HttpError } from "./app.js";
+import { McpToolDefinition, TOOL_DEFINITIONS } from "./mcp-tools.js";
 import { ExchangeStore } from "./store.js";
 import { AgentAppID } from "./types.js";
 
-const SUPPORTED_PROTOCOL_VERSION = "2025-03-26";
+const SUPPORTED_PROTOCOL_VERSIONS = [
+  "2025-11-25",
+  "2025-06-18",
+  "2025-03-26",
+  "2024-11-05"
+];
+const DEFAULT_PROTOCOL_VERSION = "2025-03-26";
+
+export interface McpScope {
+  apps?: Set<AgentAppID>;
+  readOnly: boolean;
+}
+
+const TOOL_BY_NAME = new Map<string, McpToolDefinition>(
+  TOOL_DEFINITIONS.map((tool) => [tool.name, tool])
+);
+
+function parseMcpScope(url: URL): McpScope {
+  const rawApps = url.searchParams.get("apps")?.trim();
+  let apps: Set<AgentAppID> | undefined;
+  if (rawApps) {
+    apps = new Set<AgentAppID>();
+    for (const part of rawApps.split(",")) {
+      const cleaned = part.trim().toLowerCase();
+      if (!cleaned) continue;
+      if (cleaned !== "sx" && cleaned !== "bx" && cleaned !== "csteix") {
+        throw new HttpError(
+          400,
+          `Invalid MCP 'apps' filter '${part}'. Allowed values: sx, bx, csteix.`
+        );
+      }
+      apps.add(cleaned);
+    }
+    if (apps.size === 0) apps = undefined;
+  }
+
+  const rawReadOnly = url.searchParams.get("readonly")?.trim().toLowerCase() ?? "";
+  const readOnly = rawReadOnly === "1" || rawReadOnly === "true" || rawReadOnly === "yes";
+  return { apps, readOnly };
+}
+
+function isToolAllowedInScope(tool: McpToolDefinition, scope: McpScope): boolean {
+  if (scope.readOnly && tool.annotations?.readOnlyHint !== true) {
+    return false;
+  }
+  if (scope.apps) {
+    if (tool.name.startsWith("sx_")) return scope.apps.has("sx");
+    if (tool.name.startsWith("bx_")) return scope.apps.has("bx");
+    if (tool.name.startsWith("csteix_")) return scope.apps.has("csteix");
+  }
+  return true;
+}
+
+function toolsForScope(scope: McpScope): McpToolDefinition[] {
+  if (!scope.apps && !scope.readOnly) {
+    return TOOL_DEFINITIONS;
+  }
+  return TOOL_DEFINITIONS.filter((tool) => isToolAllowedInScope(tool, scope));
+}
 
 interface JsonRpcRequest {
   jsonrpc?: string;
@@ -35,7 +94,7 @@ function rpcError(id: string | number | null, code: number, message: string): Re
 
 function toolJson(value: unknown) {
   return {
-    content: [{ type: "text", text: JSON.stringify(value, null, 2) }]
+    content: [{ type: "text", text: JSON.stringify(value) }]
   };
 }
 
@@ -69,7 +128,8 @@ function optStrArr(args: Record<string, unknown>, key: string): string[] | undef
 async function dispatchTool(
   store: ExchangeStore,
   name: string,
-  args: Record<string, unknown>
+  args: Record<string, unknown>,
+  scope: McpScope
 ): Promise<unknown> {
   switch (name) {
     case "chaox_get_status":
@@ -77,6 +137,33 @@ async function dispatchTool(
         app: args.app as AgentAppID | undefined,
         requestId: optStr(args, "requestId"),
         receiptLimit: optNum(args, "receiptLimit")
+      });
+    case "chaox_get_briefing": {
+      const requestedApps = optStrArr(args, "apps");
+      const scopedApps = scope.apps ? Array.from(scope.apps) : undefined;
+      if (requestedApps && scope.apps) {
+        const disallowed = requestedApps.filter((a) => !scope.apps!.has(a as AgentAppID));
+        if (disallowed.length > 0) {
+          throw new Error(`App(s) '${disallowed.join(", ")}' are excluded by this endpoint's 'apps' scope.`);
+        }
+      }
+      return store.getBriefing({
+        date: optStr(args, "date"),
+        apps: requestedApps ?? scopedApps
+      });
+    }
+    case "chaox_list_pending":
+      return store.listPending({
+        app: optStr(args, "app") as AgentAppID | undefined
+      });
+    case "chaox_cancel_pending":
+      return store.cancelPending(String(args.requestId ?? ""));
+    case "chaox_get_preferences":
+      return store.getPreferences();
+    case "chaox_update_preferences":
+      return store.updatePreferences({
+        content: optStr(args, "content"),
+        append: optStr(args, "append")
       });
 
     // SX Reads
@@ -149,7 +236,8 @@ async function dispatchTool(
       });
     case "sx_update_expense":
       return store.sx.updateExpense({
-        id: Number(args.id),
+        id: optNum(args, "id"),
+        pendingRequestId: optStr(args, "pendingRequestId"),
         amount: optNum(args, "amount"),
         projectName: optStr(args, "projectName"),
         credentialId: optNum(args, "credentialId"),
@@ -164,7 +252,8 @@ async function dispatchTool(
       });
     case "sx_delete_expense":
       return store.sx.deleteExpense({
-        id: Number(args.id),
+        id: optNum(args, "id"),
+        pendingRequestId: optStr(args, "pendingRequestId"),
         requestId: optStr(args, "requestId"),
         client: optStr(args, "client")
       });
@@ -206,7 +295,8 @@ async function dispatchTool(
       });
     case "sx_update_income":
       return store.sx.updateIncome({
-        id: Number(args.id),
+        id: optNum(args, "id"),
+        pendingRequestId: optStr(args, "pendingRequestId"),
         amount: optNum(args, "amount"),
         projectName: optStr(args, "projectName"),
         credentialId: optNum(args, "credentialId"),
@@ -220,7 +310,8 @@ async function dispatchTool(
       });
     case "sx_delete_income":
       return store.sx.deleteIncome({
-        id: Number(args.id),
+        id: optNum(args, "id"),
+        pendingRequestId: optStr(args, "pendingRequestId"),
         requestId: optStr(args, "requestId"),
         client: optStr(args, "client")
       });
@@ -693,7 +784,11 @@ async function dispatchTool(
   }
 }
 
-async function handleSingleRpc(msg: JsonRpcRequest, store: ExchangeStore): Promise<Response> {
+async function handleSingleRpc(
+  msg: JsonRpcRequest,
+  store: ExchangeStore,
+  scope: McpScope
+): Promise<Response> {
   const id = msg.id ?? null;
 
   if (msg.method.startsWith("notifications/")) {
@@ -701,9 +796,13 @@ async function handleSingleRpc(msg: JsonRpcRequest, store: ExchangeStore): Promi
   }
 
   switch (msg.method) {
-    case "initialize":
+    case "initialize": {
+      const requested = typeof msg.params?.protocolVersion === "string" ? msg.params.protocolVersion : "";
+      const protocolVersion = SUPPORTED_PROTOCOL_VERSIONS.includes(requested)
+        ? requested
+        : DEFAULT_PROTOCOL_VERSION;
       return rpcResult(id, {
-        protocolVersion: SUPPORTED_PROTOCOL_VERSION,
+        protocolVersion,
         capabilities: {
           tools: {},
           resources: {},
@@ -711,26 +810,34 @@ async function handleSingleRpc(msg: JsonRpcRequest, store: ExchangeStore): Promi
         },
         serverInfo: {
           name: store.getServerName(),
-          version: "1.1.0"
+          version: "1.2.0"
         },
         instructions: MCP_SERVER_INSTRUCTIONS
       });
+    }
 
     case "ping":
       return rpcResult(id, {});
 
     case "tools/list":
-      return rpcResult(id, { tools: TOOL_DEFINITIONS });
+      return rpcResult(id, { tools: toolsForScope(scope) });
 
     case "tools/call": {
       const params = msg.params ?? {};
       const toolName = typeof params.name === "string" ? params.name : "";
+      const toolDef = TOOL_BY_NAME.get(toolName);
+      if (toolDef && !isToolAllowedInScope(toolDef, scope)) {
+        return rpcResult(
+          id,
+          toolError(`Tool '${toolName}' is not available on this scoped MCP endpoint.`)
+        );
+      }
       const args =
         params.arguments && typeof params.arguments === "object"
           ? (params.arguments as Record<string, unknown>)
           : {};
       try {
-        const result = await dispatchTool(store, toolName, args);
+        const result = await dispatchTool(store, toolName, args, scope);
         return rpcResult(id, toolJson(result));
       } catch (error) {
         return rpcResult(id, toolError(error));
@@ -755,6 +862,18 @@ async function handleSingleRpc(msg: JsonRpcRequest, store: ExchangeStore): Promi
         ]
       });
 
+    case "resources/templates/list":
+      return rpcResult(id, {
+        resourceTemplates: [
+          {
+            uriTemplate: "chaox://wuxu/{slug}",
+            name: "CSTEIX Wuxu Article",
+            description: "Read a private CSTEIX Wuxu article as Markdown by lowercase kebab-case slug",
+            mimeType: "text/markdown"
+          }
+        ]
+      });
+
     case "resources/read": {
       const uri = typeof msg.params?.uri === "string" ? msg.params.uri : "";
       if (uri === "chaox://guide/skill") {
@@ -767,6 +886,44 @@ async function handleSingleRpc(msg: JsonRpcRequest, store: ExchangeStore): Promi
         return rpcResult(id, {
           contents: [{ uri, mimeType: "text/markdown", text: prefs.content }]
         });
+      }
+      if (uri.startsWith("chaox://wuxu/")) {
+        const slug = decodeURIComponent(uri.slice("chaox://wuxu/".length).trim());
+        if (!slug) {
+          return rpcError(id, -32602, "Missing Wuxu slug in resource URI.");
+        }
+        try {
+          const article = (await store.csteix.getWuxu({ slug })) as {
+            slug: string;
+            title: string;
+            titleEn?: string | null;
+            dimensions: string[];
+            localDate: string;
+            timezone: string;
+            revision: number;
+            bodyZh: string;
+            bodyEn?: string | null;
+            rawNotes?: string | null;
+          };
+          const lines = [
+            `# ${article.title}`,
+            ...(article.titleEn ? [`_${article.titleEn}_`] : []),
+            "",
+            `- **Slug**: \`${article.slug}\``,
+            `- **Dimensions**: ${article.dimensions.join(", ")}`,
+            `- **Date**: ${article.localDate} (${article.timezone})`,
+            `- **Revision**: ${article.revision}`,
+            "",
+            article.bodyZh,
+            ...(article.bodyEn ? ["", "---", "", article.bodyEn] : []),
+            ...(article.rawNotes ? ["", "## Raw Notes", "", article.rawNotes] : [])
+          ];
+          return rpcResult(id, {
+            contents: [{ uri, mimeType: "text/markdown", text: lines.join("\n") }]
+          });
+        } catch (error) {
+          return rpcError(id, -32602, error instanceof Error ? error.message : String(error));
+        }
       }
       return rpcError(id, -32602, `Unknown resource URI: ${uri}`);
     }
@@ -783,10 +940,10 @@ async function handleSingleRpc(msg: JsonRpcRequest, store: ExchangeStore): Promi
       if (promptName === "log_meal_photo") {
         const text =
           `Log this meal across SX and BX using chaox-agent:\n` +
-          `1. Inspect status & catalogs (chaox_get_status, sx_get_catalog, bx_get_summary).\n` +
-          `2. Expense hint: amount=${promptArgs.amount ?? "infer"}, currency=${promptArgs.currency ?? "default"}. Pass the meal's local hour via 'date' + 'hour' (0..23) or ISO-8601 with timezone offset, and put dish/merchant details in 'note'.\n` +
-          `3. Meal hint: ${promptArgs.meal_description ?? "analyze photo ingredients and state estimated kcal cleanly"}.\n` +
-          `4. Call sx_record_expense and bx_record_food with matching requestId prefix and report optimistic totals.`;
+          `1. Call chaox_get_briefing (or chaox_get_status + sx_get_catalog + bx_get_summary) to inspect permitted apps, timezones, and active meal project names.\n` +
+          `2. Expense hint: amount=${promptArgs.amount ?? "infer"}, currency=${promptArgs.currency ?? "default"}. Pass the meal's local hour via 'date' + 'hour' (0..23) or ISO-8601 with offset, and put dish/merchant details in 'note'.\n` +
+          `3. Meal hint: ${promptArgs.meal_description ?? "analyze photo ingredients and state estimated kcal transparently"}.\n` +
+          `4. Call sx_record_expense and bx_record_food with matching requestId prefix and report updated optimistic totals.`;
         return rpcResult(id, {
           description: "Cross-app meal photo logging workflow",
           messages: [{ role: "user", content: { type: "text", text } }]
@@ -794,14 +951,56 @@ async function handleSingleRpc(msg: JsonRpcRequest, store: ExchangeStore): Promi
       }
       if (promptName === "daily_review") {
         const dateHint = typeof promptArgs.date === "string" ? promptArgs.date : "today";
+        const dateArg = typeof promptArgs.date === "string" ? `date='${promptArgs.date}'` : "";
         const text =
-          `Review my ${dateHint} summary across SX, BX, and CSTEIX:\n` +
-          `1. Call sx_get_summary(period='today', mode='expense') and sx_get_summary(period='today', mode='income').\n` +
-          `2. Call bx_get_summary and bx_list_sleep/workouts/food/skin/toilet as permitted.\n` +
-          `3. If CSTEIX is connected, call csteix_get_summary and csteix_list_wuxu for ${dateHint}.\n` +
-          `4. Highlight committed vs pending inbox changes concisely.`;
+          `Review my ${dateHint} across SX, BX, and CSTEIX:\n` +
+          `1. Start with chaox_get_briefing(${dateArg}) for a unified snapshot.\n` +
+          `2. Drill into details as needed using sx_list_expenses / sx_list_incomes (check 'aggregates'), bx_list_sleep / bx_list_workouts / bx_list_food / bx_list_skin / bx_list_toilet, and csteix_get_wuxu.\n` +
+          `3. Highlight committed vs queued inbox items concisely.`;
         return rpcResult(id, {
           description: "Daily SX + BX + CSTEIX check-in",
+          messages: [{ role: "user", content: { type: "text", text } }]
+        });
+      }
+      if (promptName === "weekly_review") {
+        const weekRangeHint =
+          typeof promptArgs.from === "string" && typeof promptArgs.to === "string"
+            ? `from ${promptArgs.from} to ${promptArgs.to}`
+            : "for the past 7 days";
+        const text =
+          `Perform a weekly review ${weekRangeHint} across SX, BX, and CSTEIX:\n` +
+          `1. Call chaox_get_briefing and sx_get_summary(period='week', mode='expense') + sx_get_summary(period='week', mode='income').\n` +
+          `2. Use sx_list_expenses and sx_list_incomes with the date range and inspect 'aggregates.totalsByCurrency', 'byProject', and 'byTag'.\n` +
+          `3. Call bx_list_sleep, bx_list_workouts ('aggregates' for duration & volume kg), bx_list_food ('aggregates'), and csteix_get_summary + csteix_list_wuxu for the date window.\n` +
+          `4. Synthesize trends in spending, training volume, nutrition, sleep, stillness, and writing.`;
+        return rpcResult(id, {
+          description: "7-day cross-app trend & aggregate review",
+          messages: [{ role: "user", content: { type: "text", text } }]
+        });
+      }
+      if (promptName === "log_workout_session") {
+        const dateArg = typeof promptArgs.date === "string" ? `from='${promptArgs.date}', to='${promptArgs.date}'` : "";
+        const notesHint = typeof promptArgs.notes === "string" ? promptArgs.notes : "ask or inspect user workout notes";
+        const text =
+          `Log exercise/set annotations onto a BX workout:\n` +
+          `1. Call bx_list_workouts(${dateArg}) to find the target Apple Health workoutId.\n` +
+          `2. For each movement mentioned (${notesHint}), call bx_list_exercises(query=...) to resolve exact exercise key & equipment.\n` +
+          `3. Use bx_add_workout_exercise with grouped sets [{reps, sets, weightKg}] (or bx_update_workout_type if canChooseType=true).\n` +
+          `4. Never try to modify HealthKit start/end/duration/HR frames.`;
+        return rpcResult(id, {
+          description: "Annotate BX Apple Health workout with exercises & sets",
+          messages: [{ role: "user", content: { type: "text", text } }]
+        });
+      }
+      if (promptName === "write_wuxu") {
+        const topicHint = typeof promptArgs.topic === "string" ? promptArgs.topic : "today's entry";
+        const text =
+          `Draft or continue a private CSTEIX Wuxu article (${topicHint}):\n` +
+          `1. Call csteix_list_wuxu to inspect existing pieces on today's date or matching topic.\n` +
+          `2. If continuing a same-day article, call csteix_get_wuxu to read full text and current revision, then call csteix_update_wuxu with expectedRevision and appendBodyZh/appendRawNotes.\n` +
+          `3. If creating a new piece, use a lowercase kebab-case slug, dimensions from ['chaos','spacetime','existence','ix'], pure body Markdown in bodyZh (no leading # Title header block), and verbatim user utterances in rawNotes.`;
+        return rpcResult(id, {
+          description: "Draft or continue a private CSTEIX Wuxu article",
           messages: [{ role: "user", content: { type: "text", text } }]
         });
       }
@@ -821,6 +1020,8 @@ export async function handleMcpRequest(request: Request, store: ExchangeStore): 
     );
   }
 
+  const scope = parseMcpScope(new URL(request.url));
+
   let parsed: unknown;
   try {
     parsed = await request.json();
@@ -835,7 +1036,7 @@ export async function handleMcpRequest(request: Request, store: ExchangeStore): 
         responses.push({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request" } });
         continue;
       }
-      const res = await handleSingleRpc(item as JsonRpcRequest, store);
+      const res = await handleSingleRpc(item as JsonRpcRequest, store, scope);
       if (res.status !== 202) {
         responses.push(await res.json());
       }
@@ -850,5 +1051,5 @@ export async function handleMcpRequest(request: Request, store: ExchangeStore): 
     return rpcError(null, -32600, "Invalid JSON-RPC Request");
   }
 
-  return handleSingleRpc(parsed as JsonRpcRequest, store);
+  return handleSingleRpc(parsed as JsonRpcRequest, store, scope);
 }

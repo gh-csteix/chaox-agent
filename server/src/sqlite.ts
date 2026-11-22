@@ -14,11 +14,15 @@ function resolveDefaultMigrationsDir(): string {
   return direct;
 }
 
+type PreparedSync = ReturnType<DatabaseSync["prepare"]>;
+
+const MAX_STATEMENT_CACHE_SIZE = 256;
+
 class SqlitePreparedStatement implements SqlPreparedStatement {
   private boundValues: SQLInputValue[] = [];
 
   constructor(
-    private readonly db: DatabaseSync,
+    private readonly provider: { getPreparedStatement(query: string): PreparedSync },
     private readonly query: string
   ) {}
 
@@ -30,13 +34,13 @@ class SqlitePreparedStatement implements SqlPreparedStatement {
   }
 
   async first<T = Record<string, unknown>>(): Promise<T | null> {
-    const stmt = this.db.prepare(this.query);
+    const stmt = this.provider.getPreparedStatement(this.query);
     const row = stmt.get(...this.boundValues);
     return (row ?? null) as T | null;
   }
 
   async all<T = Record<string, unknown>>(): Promise<{ results: T[] }> {
-    const stmt = this.db.prepare(this.query);
+    const stmt = this.provider.getPreparedStatement(this.query);
     const rows = stmt.all(...this.boundValues);
     return { results: rows as T[] };
   }
@@ -46,7 +50,7 @@ class SqlitePreparedStatement implements SqlPreparedStatement {
   }
 
   runSync(): unknown {
-    const stmt = this.db.prepare(this.query);
+    const stmt = this.provider.getPreparedStatement(this.query);
     return stmt.run(...this.boundValues);
   }
 }
@@ -117,6 +121,7 @@ export interface SqliteDatabaseOptions {
 export class SqliteDatabase implements SqlDatabase {
   readonly sqlite: DatabaseSync;
   readonly dbPath: string;
+  private readonly statementCache = new Map<string, PreparedSync>();
   private closed = false;
 
   constructor(dbPath: string, options: SqliteDatabaseOptions = {}) {
@@ -203,8 +208,24 @@ export class SqliteDatabase implements SqlDatabase {
     return newlyApplied;
   }
 
+  getPreparedStatement(query: string): PreparedSync {
+    const cached = this.statementCache.get(query);
+    if (cached) {
+      return cached;
+    }
+    const stmt = this.sqlite.prepare(query);
+    if (this.statementCache.size >= MAX_STATEMENT_CACHE_SIZE) {
+      const oldestKey = this.statementCache.keys().next().value;
+      if (oldestKey !== undefined) {
+        this.statementCache.delete(oldestKey);
+      }
+    }
+    this.statementCache.set(query, stmt);
+    return stmt;
+  }
+
   prepare(query: string): SqlPreparedStatement {
-    return new SqlitePreparedStatement(this.sqlite, query);
+    return new SqlitePreparedStatement(this, query);
   }
 
   async batch(statements: SqlPreparedStatement[]): Promise<unknown[]> {
@@ -231,6 +252,7 @@ export class SqliteDatabase implements SqlDatabase {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.statementCache.clear();
     this.sqlite.close();
   }
 }

@@ -121,6 +121,8 @@ Because all state lives in a single SQLite file (using schemas identical to `ser
 
 - **iOS apps (`SX`, `BX`, `CSTEIX`)**: Open **Settings -> AI Assistant**, paste your server base URL (`https://agent.yourdomain.com`, without `/mcp`) and `CHAOX_AUTH_TOKEN`, then tap **Connect & Sync**.
 - **AI MCP clients**: Configure Streamable HTTP URL `https://agent.yourdomain.com/mcp` with header `Authorization: Bearer <your-token>`.
+  - Optional per-client scoping query params are supported on `/mcp`: `?apps=sx,bx` (restrict to specific apps) and `?readonly=1` (read-only tools only).
+  - HTTP responses >= 1 KiB are automatically gzip-compressed when clients send `Accept-Encoding: gzip`, and MCP tool outputs emit compact JSON.
 - **Import existing local Wuxu Markdown archive**:
   ```bash
   CHAOX_AUTH_TOKEN="<your-token>" CHAOX_SERVER_URL="https://agent.yourdomain.com" \

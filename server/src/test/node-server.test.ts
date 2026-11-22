@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
+import { gunzipSync } from "node:zlib";
 import { startNodeServer } from "../node-server.js";
 import { SqliteDatabase } from "../sqlite.js";
 import { SCHEMA_VERSION } from "../types.js";
@@ -51,7 +52,7 @@ test("boots standalone Node HTTP server with persistent SQLite, enforces auth, h
         Authorization: `Bearer ${token}`
       };
 
-      // 3) MCP initialize + tools/list exposes all 67 tools under chaox-agent-server.
+      // 3) MCP initialize + tools/list exposes all 72 tools under chaox-agent-server (and gzip compresses >= 1 KiB).
       const initRes = await fetch(`${server1.baseUrl}/mcp`, {
         method: "POST",
         headers: authHeaders,
@@ -59,18 +60,57 @@ test("boots standalone Node HTTP server with persistent SQLite, enforces auth, h
       });
       assert.equal(initRes.status, 200);
       const initJson = (await initRes.json()) as {
-        result: { serverInfo: { name: string }; instructions: string };
+        result: { serverInfo: { name: string; version: string }; instructions: string };
       };
       assert.equal(initJson.result.serverInfo.name, "chaox-agent-server");
+      assert.equal(initJson.result.serverInfo.version, "1.2.0");
       assert.match(initJson.result.instructions, /CHAOX Agent Protocol v1/);
 
       const listRes = await fetch(`${server1.baseUrl}/mcp`, {
         method: "POST",
-        headers: authHeaders,
+        headers: { ...authHeaders, "Accept-Encoding": "gzip" },
         body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} })
       });
       const listJson = (await listRes.json()) as { result: { tools: Array<{ name: string }> } };
-      assert.equal(listJson.result.tools.length, 67);
+      assert.equal(listJson.result.tools.length, 72);
+
+      // Verify raw HTTP socket delivers gzip when Accept-Encoding: gzip is requested.
+      const httpMod = await import("node:http");
+      const rawUrl = new URL(`${server1.baseUrl}/mcp`);
+      const gzipCheck = await new Promise<{ contentEncoding?: string; toolCount: number }>((resolve, reject) => {
+        const req = httpMod.request(
+          {
+            hostname: rawUrl.hostname,
+            port: rawUrl.port,
+            path: rawUrl.pathname,
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${token}`,
+              "Accept-Encoding": "gzip"
+            }
+          },
+          (res) => {
+            const chunks: Buffer[] = [];
+            res.on("data", (c: Buffer) => chunks.push(c));
+            res.on("end", () => {
+              try {
+                const raw = Buffer.concat(chunks);
+                const enc = res.headers["content-encoding"];
+                const decoded = enc === "gzip" ? gunzipSync(raw).toString("utf8") : raw.toString("utf8");
+                const parsed = JSON.parse(decoded) as { result: { tools: unknown[] } };
+                resolve({ contentEncoding: enc, toolCount: parsed.result.tools.length });
+              } catch (err) {
+                reject(err);
+              }
+            });
+          }
+        );
+        req.on("error", reject);
+        req.end(JSON.stringify({ jsonrpc: "2.0", id: 201, method: "tools/list", params: {} }));
+      });
+      assert.equal(gzipCheck.contentEncoding, "gzip");
+      assert.equal(gzipCheck.toolCount, 72);
 
       // 4) Upload SX snapshot, queue expense, check status backend=sqlite, and drain inbox.
       const snapRes = await fetch(`${server1.baseUrl}/sync/sx/snapshot`, {

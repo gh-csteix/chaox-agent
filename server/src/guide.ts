@@ -1,13 +1,14 @@
 export const MCP_SERVER_INSTRUCTIONS =
   "You are connected to a personal CHAOX Agent Protocol v1 gateway backed by the user's own self-hosted server and SQLite/D1 database. " +
-  "Always call chaox_get_status first to check each app's granular permission policy (allowRead/allowCreate/allowUpdate/allowDelete and allowedDomains). " +
-  "Before recording or querying SX spending, call sx_get_catalog first to read timeZoneIdentifier, active projects (with recentExpenseTags/recentIncomeTags), tags, supportedCurrencies, and fieldGuide. " +
+  "Start sessions with chaox_get_briefing (for a one-shot daily overview, active catalogs, and user preferences) or chaox_get_status (to inspect permissions, receipts, and pending inbox counts). " +
+  "Use chaox_get_preferences / chaox_update_preferences to remember user-stated routing habits, and chaox_list_pending / chaox_cancel_pending (or pendingRequestId / 'pending:<requestId>' directly on update/delete tools) to inspect, fix, or cancel un-synced queued writes. " +
+  "Before recording SX spending when projects aren't already known, call sx_get_catalog to read timeZoneIdentifier, active projects (with recentExpenseTags/recentIncomeTags), tags, supportedCurrencies, and fieldGuide. " +
   "SX expenses have calendar-date + 24-hour local hour (00-23) precision, displayed in the SX app as YYYY-MM-DD-HH where the trailing two digits are the 24-hour local hour in timeZoneIdentifier (e.g. 2026-11-22-12 = 12:00 noon, 2026-11-21-00 = midnight/hour unknown — NEVER minutes or a sequence number). Pass ISO-8601 with offset ('2026-11-22T12:00:00+08:00'), 'YYYY-MM-DD-HH', or 'YYYY-MM-DD' + hour (0..23); bare YYYY-MM-DD without hour defaults to local 00:00. " +
   "In SX, projectName must match an existing reusable project/category bucket (put merchant/dish/item details in 'note'); omit 'tags' on create to inherit the project's latest tags or pass [] to clear tags. " +
-  "sx_update_expense and sx_update_income apply partial patches in strict FIFO order on device, so follow-up corrections on the same record id can be queued immediately without waiting for the user to sync first. " +
+  "sx_update_expense and sx_update_income apply partial patches in strict FIFO order on device, and also support editing/cancelling queued creates via pendingRequestId. " +
   "Credential Vault secrets (passwords, TOTP secrets, recovery codes, notes) NEVER leave the device; non-secret credential metadata and links are opt-in under 'credentials'. All SX deletions move items to 30-day Trash. " +
-  "In BX, Apple Health sleep nights and workout frames/duration/HR/energy are strictly read-only, while food, topical medicine/skincare, toilet logs, and workout exercise/set annotations support full CRUD when enabled. " +
-  "In CSTEIX, dwell, meditation, marks, and opt-in places (off by default) are strictly read-only snapshots from the iOS app. Private daily Wuxu articles ('wuxu') execute CRUD immediately against the server database with optimistic expectedRevision locking, 30-day soft-delete Trash + restore, and immediate 'applied' receipts (synced back to iOS via GET /sync/csteix/wuxu). " +
+  "In BX, Apple Health sleep nights and workout frames/duration/HR/energy are strictly read-only, while food, topical medicine/skincare, toilet logs, and workout exercise/set annotations support full CRUD when enabled; BX recordedAt accepts ISO-8601 with offset, local 'YYYY-MM-DD HH:mm', or 'YYYY-MM-DD' in BX timezone. " +
+  "In CSTEIX, dwell, meditation, marks, and opt-in places (off by default) are strictly read-only snapshots from the iOS app. Private daily Wuxu articles ('wuxu') execute CRUD immediately against the server database with optimistic expectedRevision locking, 30-day soft-delete Trash + restore, and immediate 'applied' receipts (also readable via chaox://wuxu/{slug}). " +
   "SX and BX writes enqueue into the server inbox until the user's iPhone syncs.";
 
 export const SKILL_GUIDE_MARKDOWN = `# CHAOX Agent Skill
@@ -26,10 +27,14 @@ Use these MCP tools to read, create, update, and delete permitted records for **
 
 ## Common Workflows
 
+- **One-Shot Context (\`chaox_get_briefing\`)**: Call \`chaox_get_briefing\` at the start of a session to retrieve custom preferences, SX today/month optimistic totals + active projects/tags, BX daily totals + latest sleep + workouts, and CSTEIX summary in one round-trip.
+- **Remember Habits**: Use \`chaox_get_preferences\` / \`chaox_update_preferences\` (with \`append\` or \`content\`) so routing rules stay consistent across AI clients.
+- **Inspect / Fix / Cancel Un-Synced Inbox Writes**: Call \`chaox_list_pending\` to view queued SX/BX writes, pass \`pendingRequestId\` to \`sx_update_expense\` / \`sx_delete_expense\` / \`sx_update_income\` / \`sx_delete_income\` or \`pending:<requestId>\` to BX \`update_*\` / \`delete_*\` to edit/cancel before sync, or call \`chaox_cancel_pending\`.
+- **Aggregates Without Large Pagination**: \`sx_list_expenses\`, \`sx_list_incomes\`, \`bx_list_food\`, and \`bx_list_workouts\` always compute pre-pagination \`aggregates\` across the entire filtered set (currency totals, top projects/tags, meal calories, set volume kg).
 - **List before updating/deleting**: Call \`sx_list_expenses\` / \`sx_list_projects\` / \`sx_list_credentials\` / \`bx_list_food\` / \`bx_list_workouts\` / \`bx_list_skin\` / \`bx_list_toilet\` / \`csteix_list_wuxu\` to obtain exact record IDs, slugs, or revisions.
 - **Workouts & Equipment**: Call \`bx_list_exercises\` to match exercises by key, Chinese/English title, or equipment before calling \`bx_add_workout_exercise\` or \`bx_update_workout_exercise\`.
-- **Meal Photo + Cost**: Call \`sx_record_expense\` and \`bx_record_food\` with a shared \`requestId\` prefix, estimating kcal transparently when not stated.
-- **Daily Wuxu Writing**: Search existing articles with \`csteix_list_wuxu\` (searches titles, bodies, and \`rawNotes\`). Call \`csteix_get_wuxu\` to inspect full text and current \`revision\`. For a new piece call \`csteix_create_wuxu\` with pure body Markdown (without the \`# Title\` header block) and verbatim user quotes in \`rawNotes\`; for same-day continuations call \`csteix_update_wuxu\` with \`expectedRevision\` and \`appendBodyZh\` / \`appendRawNotes\`.
+- **Meal Photo + Cost**: Call \`sx_record_expense\` and \`bx_record_food\` with a shared \`requestId\` prefix, estimating kcal transparently when not stated. BX \`recordedAt\` accepts ISO-8601 with offset, local \`YYYY-MM-DD HH:mm\`, or \`YYYY-MM-DD\` (local noon in BX timezone).
+- **Daily Wuxu Writing**: Search existing articles with \`csteix_list_wuxu\` (searches titles, bodies, and \`rawNotes\`). Read full Markdown via \`csteix_get_wuxu\` or MCP resource \`chaox://wuxu/{slug}\`. For a new piece call \`csteix_create_wuxu\` with pure body Markdown (without the \`# Title\` header block) and verbatim user quotes in \`rawNotes\`; for same-day continuations call \`csteix_update_wuxu\` with \`expectedRevision\` and \`appendBodyZh\` / \`appendRawNotes\`.
 
 ## SX Expense & Income Field Reference
 
@@ -62,7 +67,7 @@ Both tools validate immediately, and \`sx_update_expense\` applies **partial pat
 
 export const DEFAULT_PREFERENCES_MARKDOWN = `# Personal CHAOX Assistant Preferences
 
-No custom preferences saved yet. PUT /preferences with your routing rules (for example, default meal project name, currency, or workout set conventions) so every AI client follows them automatically.
+No custom preferences saved yet. Call chaox_update_preferences (or PUT /preferences) with your routing rules (for example, default meal project name, currency, or workout set conventions) so every AI client follows them automatically.
 `;
 
 export const MCP_PROMPTS = [
@@ -91,11 +96,57 @@ export const MCP_PROMPTS = [
   {
     name: "daily_review",
     description:
-      "Summarize today's expenses/income in SX, sleep/workouts/meals/skincare/toilet logs in BX, and dwell/meditation/Wuxu activity in CSTEIX.",
+      "One-shot daily check-in across SX, BX, and CSTEIX starting from chaox_get_briefing.",
     arguments: [
       {
         name: "date",
         description: "Calendar date YYYY-MM-DD (defaults to today)",
+        required: false
+      }
+    ]
+  },
+  {
+    name: "weekly_review",
+    description:
+      "7-day trend & aggregate analysis across SX spending/income, BX training/sleep/nutrition, and CSTEIX stillness/Wuxu.",
+    arguments: [
+      {
+        name: "from",
+        description: "Optional start date YYYY-MM-DD",
+        required: false
+      },
+      {
+        name: "to",
+        description: "Optional end date YYYY-MM-DD",
+        required: false
+      }
+    ]
+  },
+  {
+    name: "log_workout_session",
+    description:
+      "Resolve exercise library keys/equipment and attach sets/weights onto a BX Apple Health workout.",
+    arguments: [
+      {
+        name: "date",
+        description: "Workout date YYYY-MM-DD (defaults to recent workouts)",
+        required: false
+      },
+      {
+        name: "notes",
+        description: "Movements, sets, reps, and weights in kg to log",
+        required: false
+      }
+    ]
+  },
+  {
+    name: "write_wuxu",
+    description:
+      "Draft a new private CSTEIX Wuxu article or continue an existing same-day article with expectedRevision.",
+    arguments: [
+      {
+        name: "topic",
+        description: "Title, slug, or reflections to write",
         required: false
       }
     ]

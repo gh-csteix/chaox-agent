@@ -139,17 +139,91 @@ export function safeJsonParse<T>(raw: string | null | undefined): T | null {
   }
 }
 
+const MAX_TZ_CACHE_SIZE = 64;
+const VALIDATED_TIMEZONES = new Set<string>();
+const DATE_ONLY_FORMATTERS = new Map<string, Intl.DateTimeFormat>();
+const DATE_HOUR_FORMATTERS = new Map<string, Intl.DateTimeFormat>();
+const DATE_TIME_FORMATTERS = new Map<string, Intl.DateTimeFormat>();
+
+function getCachedFormatter(
+  cache: Map<string, Intl.DateTimeFormat>,
+  tz: string,
+  build: (timeZone: string) => Intl.DateTimeFormat
+): Intl.DateTimeFormat {
+  const existing = cache.get(tz);
+  if (existing) return existing;
+  const formatter = build(tz);
+  if (cache.size >= MAX_TZ_CACHE_SIZE) {
+    const oldest = cache.keys().next().value;
+    if (oldest !== undefined) cache.delete(oldest);
+  }
+  cache.set(tz, formatter);
+  return formatter;
+}
+
 export function effectiveTimeZone(timeZoneIdentifier?: string): string {
   const tz = timeZoneIdentifier?.trim();
   if (tz) {
+    if (VALIDATED_TIMEZONES.has(tz)) return tz;
     try {
       new Intl.DateTimeFormat("en-US", { timeZone: tz });
+      if (VALIDATED_TIMEZONES.size < MAX_TZ_CACHE_SIZE) {
+        VALIDATED_TIMEZONES.add(tz);
+      }
       return tz;
     } catch {
       // Fall back to UTC if the supplied timezone identifier is invalid.
     }
   }
   return "UTC";
+}
+
+function getDateOnlyFormatter(tz: string): Intl.DateTimeFormat {
+  return getCachedFormatter(
+    DATE_ONLY_FORMATTERS,
+    tz,
+    (timeZone) =>
+      new Intl.DateTimeFormat("en-CA", {
+        timeZone,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit"
+      })
+  );
+}
+
+function getDateHourFormatter(tz: string): Intl.DateTimeFormat {
+  return getCachedFormatter(
+    DATE_HOUR_FORMATTERS,
+    tz,
+    (timeZone) =>
+      new Intl.DateTimeFormat("en-US", {
+        timeZone,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        hourCycle: "h23"
+      })
+  );
+}
+
+function getDateTimeFormatter(tz: string): Intl.DateTimeFormat {
+  return getCachedFormatter(
+    DATE_TIME_FORMATTERS,
+    tz,
+    (timeZone) =>
+      new Intl.DateTimeFormat("en-US", {
+        timeZone,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hourCycle: "h23"
+      })
+  );
 }
 
 export function zonedLocalToUtcIso(
@@ -162,16 +236,7 @@ export function zonedLocalToUtcIso(
   timeZone: string
 ): string {
   const targetUtcMs = Date.UTC(year, month - 1, day, hour, minute, second, 0);
-  const formatter = new Intl.DateTimeFormat("en-US", {
-    timeZone: effectiveTimeZone(timeZone),
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hourCycle: "h23"
-  });
+  const formatter = getDateTimeFormatter(effectiveTimeZone(timeZone));
 
   const partsMs = (ms: number): number => {
     const parts = formatter.formatToParts(new Date(ms));
@@ -219,14 +284,7 @@ export function localDateHourParts(
   if (Number.isNaN(ms)) return null;
 
   const tz = effectiveTimeZone(timeZoneIdentifier);
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: tz,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    hourCycle: "h23"
-  }).formatToParts(new Date(ms));
+  const parts = getDateHourFormatter(tz).formatToParts(new Date(ms));
   const map: Record<string, string> = {};
   for (const part of parts) {
     if (part.type !== "literal") map[part.type] = part.value;
@@ -238,6 +296,33 @@ export function localDateHourParts(
     localDate,
     localHour,
     displayDate: `${localDate}-${String(localHour).padStart(2, "0")}`
+  };
+}
+
+export function localDateTimeParts(
+  timestampIso: string | undefined,
+  timeZoneIdentifier?: string
+): { localDate: string; localTime: string; localHour: number; displayDate: string } | null {
+  const trimmed = timestampIso?.trim() ?? "";
+  if (!trimmed) return null;
+  const ms = Date.parse(trimmed);
+  if (Number.isNaN(ms)) return null;
+
+  const tz = effectiveTimeZone(timeZoneIdentifier);
+  const parts = getDateTimeFormatter(tz).formatToParts(new Date(ms));
+  const map: Record<string, string> = {};
+  for (const part of parts) {
+    if (part.type !== "literal") map[part.type] = part.value;
+  }
+  if (!map.year || !map.month || !map.day || map.hour === undefined || map.minute === undefined) return null;
+  const localHour = Number(map.hour) === 24 ? 0 : Number(map.hour);
+  const localDate = `${map.year}-${map.month}-${map.day}`;
+  const hourStr = String(localHour).padStart(2, "0");
+  return {
+    localDate,
+    localTime: `${hourStr}:${map.minute}`,
+    localHour,
+    displayDate: `${localDate}-${hourStr}`
   };
 }
 
@@ -357,21 +442,57 @@ export function resolveSxTimestamp(
   return iso;
 }
 
-export function validateIsoTimestamp(raw: unknown, fieldName: string): string | undefined {
+export function resolveBxTimestamp(
+  raw: unknown,
+  fieldName: string,
+  timeZone?: string
+): string | undefined {
   if (raw === undefined || raw === null) return undefined;
   if (typeof raw !== "string") {
-    throw new Error(`Invalid ISO-8601 date/time for '${fieldName}'.`);
+    throw new Error(`Invalid date/time for '${fieldName}'. Expected ISO-8601, 'YYYY-MM-DD HH:mm', or 'YYYY-MM-DD'.`);
   }
   const trimmed = raw.trim();
   if (!trimmed) return undefined;
-  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
-    return `${trimmed}T12:00:00.000Z`;
+
+  const tz = effectiveTimeZone(timeZone);
+
+  const dateOnlyMatch = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(trimmed);
+  if (dateOnlyMatch) {
+    return zonedLocalToUtcIso(
+      Number(dateOnlyMatch[1]),
+      Number(dateOnlyMatch[2]),
+      Number(dateOnlyMatch[3]),
+      12,
+      0,
+      0,
+      tz
+    );
   }
+
+  const localDateTimeMatch = /^(\d{4})-(\d{1,2})-(\d{1,2})[T ](\d{1,2}):(\d{2})(?::(\d{2})(?:\.\d{1,3})?)?$/.exec(
+    trimmed
+  );
+  if (localDateTimeMatch) {
+    return zonedLocalToUtcIso(
+      Number(localDateTimeMatch[1]),
+      Number(localDateTimeMatch[2]),
+      Number(localDateTimeMatch[3]),
+      Number(localDateTimeMatch[4]),
+      Number(localDateTimeMatch[5]),
+      localDateTimeMatch[6] !== undefined ? Number(localDateTimeMatch[6]) : 0,
+      tz
+    );
+  }
+
   const parsed = Date.parse(trimmed);
   if (Number.isNaN(parsed)) {
     throw new Error(`Invalid ISO-8601 date/time for '${fieldName}': ${raw}`);
   }
   return new Date(parsed).toISOString();
+}
+
+export function validateIsoTimestamp(raw: unknown, fieldName: string): string | undefined {
+  return resolveBxTimestamp(raw, fieldName, "UTC");
 }
 
 export function requireNonEmptyString(raw: unknown, fieldName: string): string {
@@ -434,15 +555,10 @@ export function localDateKey(timestampIso: string | undefined, timeZoneIdentifie
   if (Number.isNaN(ms)) return trimmed.slice(0, 10);
 
   const date = new Date(ms);
-  const tz = timeZoneIdentifier?.trim();
-  if (tz) {
+  const tz = effectiveTimeZone(timeZoneIdentifier);
+  if (tz !== "UTC" || timeZoneIdentifier?.trim()) {
     try {
-      const parts = new Intl.DateTimeFormat("en-CA", {
-        timeZone: tz,
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit"
-      }).formatToParts(date);
+      const parts = getDateOnlyFormatter(tz).formatToParts(date);
       const year = parts.find((part) => part.type === "year")?.value;
       const month = parts.find((part) => part.type === "month")?.value;
       const day = parts.find((part) => part.type === "day")?.value;
@@ -454,6 +570,72 @@ export function localDateKey(timestampIso: string | undefined, timeZoneIdentifie
     }
   }
   return date.toISOString().slice(0, 10);
+}
+
+export function isoWeekKey(localDate: string): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(localDate.trim());
+  if (!match) return "";
+  const utc = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
+  if (Number.isNaN(utc.getTime())) return "";
+  const dayNum = utc.getUTCDay() || 7;
+  utc.setUTCDate(utc.getUTCDate() + 4 - dayNum);
+  const isoYear = utc.getUTCFullYear();
+  const yearStart = new Date(Date.UTC(isoYear, 0, 1));
+  const weekNo = Math.ceil((((utc.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
+  return `${isoYear}-W${String(weekNo).padStart(2, "0")}`;
+}
+
+export function matchesSxPeriod(
+  itemLocalDate: string,
+  period: "today" | "week" | "month" | "year" | "allTime",
+  todayLocalDate: string
+): boolean {
+  if (period === "allTime") return true;
+  if (!itemLocalDate || !todayLocalDate) return true;
+  switch (period) {
+    case "today":
+      return itemLocalDate === todayLocalDate;
+    case "week":
+      return isoWeekKey(itemLocalDate) === isoWeekKey(todayLocalDate);
+    case "month":
+      return itemLocalDate.slice(0, 7) === todayLocalDate.slice(0, 7);
+    case "year":
+      return itemLocalDate.slice(0, 4) === todayLocalDate.slice(0, 4);
+  }
+}
+
+export function extractChangedRows(runResult: unknown): number | null {
+  if (!runResult || typeof runResult !== "object") return null;
+  const obj = runResult as { changes?: unknown; meta?: { changes?: unknown } };
+  if (typeof obj.changes === "number") return obj.changes;
+  if (obj.meta && typeof obj.meta.changes === "number") return obj.meta.changes;
+  return null;
+}
+
+export function rankFuzzyMatches(query: string, candidates: string[], maxResults = 6): string[] {
+  const normQuery = query.trim().toLowerCase();
+  if (!normQuery) return candidates.slice(0, maxResults);
+  const tokens = normQuery.split(/[\s\-_/]+/).filter((t) => t.length > 0);
+
+  const scored: Array<{ value: string; score: number; idx: number }> = [];
+  for (let idx = 0; idx < candidates.length; idx += 1) {
+    const value = candidates[idx];
+    const norm = value.toLowerCase();
+    let score = 0;
+    if (norm === normQuery) score += 100;
+    else if (norm.startsWith(normQuery)) score += 60;
+    else if (norm.includes(normQuery)) score += 45;
+    else if (normQuery.includes(norm)) score += 30;
+    for (const token of tokens) {
+      if (norm.includes(token)) score += 12;
+    }
+    if (score > 0) {
+      scored.push({ value, score, idx });
+    }
+  }
+  scored.sort((a, b) => b.score - a.score || a.idx - b.idx);
+  const top = scored.slice(0, maxResults).map((s) => s.value);
+  return top.length > 0 ? top : candidates.slice(0, maxResults);
 }
 
 export function matchesDateRange(

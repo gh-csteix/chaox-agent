@@ -6,6 +6,7 @@ import {
   matchesQuery,
   normalizePagination,
   paginate,
+  rankFuzzyMatches,
   requireNonEmptyString,
   resolveSxTimestamp,
   safeJsonParse,
@@ -13,6 +14,7 @@ import {
 } from "./store-helpers.js";
 import { BxStoreContext } from "./store-bx.js";
 import {
+  InboxEnvelope,
   SxCatalog,
   SxCredentialRecord,
   SxExpenseRecord,
@@ -90,6 +92,130 @@ function normalizeTagsArray(raw: unknown): string[] | undefined {
   return raw.map((t) => String(t).trim()).filter((t) => t.length > 0);
 }
 
+function resolveKnownProjectName(
+  rawProject: string,
+  mode: "expense" | "income",
+  catalog: SxCatalog | null,
+  pendingProjects: Array<{ name: string; cashFlowSides: string }> = []
+): string {
+  const match = catalog?.projects?.find((proj) => proj.name.trim().toLowerCase() === rawProject.toLowerCase());
+  if (match) {
+    if (mode === "expense" && match.supportsExpense === false) {
+      throw new Error(`Project '${match.name}' does not support expense records.`);
+    }
+    if (mode === "income" && match.supportsIncome === false) {
+      throw new Error(`Project '${match.name}' does not support income records.`);
+    }
+    return match.name;
+  }
+
+  const pendingMatch = pendingProjects.find((proj) => proj.name.toLowerCase() === rawProject.toLowerCase());
+  if (pendingMatch) {
+    const supportsExpense = pendingMatch.cashFlowSides === "expenseOnly" || pendingMatch.cashFlowSides === "both";
+    const supportsIncome = pendingMatch.cashFlowSides === "incomeOnly" || pendingMatch.cashFlowSides === "both";
+    if (mode === "expense" && !supportsExpense) {
+      throw new Error(`Project '${pendingMatch.name}' does not support expense records.`);
+    }
+    if (mode === "income" && !supportsIncome) {
+      throw new Error(`Project '${pendingMatch.name}' does not support income records.`);
+    }
+    return pendingMatch.name;
+  }
+
+  if (catalog?.projects?.length) {
+    const eligibleNames = [
+      ...catalog.projects
+        .filter((proj) => (mode === "expense" ? proj.supportsExpense !== false : proj.supportsIncome === true))
+        .map((proj) => proj.name),
+      ...pendingProjects
+        .filter((proj) =>
+          mode === "expense"
+            ? proj.cashFlowSides === "expenseOnly" || proj.cashFlowSides === "both"
+            : proj.cashFlowSides === "incomeOnly" || proj.cashFlowSides === "both"
+        )
+        .map((proj) => proj.name)
+    ];
+    const suggestions = rankFuzzyMatches(rawProject, eligibleNames, 6);
+    const listText = suggestions.length > 0 ? suggestions.join(", ") : catalog.projects.map((p) => p.name).join(", ");
+    throw new Error(`Unknown projectName '${rawProject}'. Known projects (closest matches): ${listText}`);
+  }
+
+  return rawProject;
+}
+
+function computeCashFlowAggregates(
+  items: Array<{
+    projectName: string;
+    amount: number;
+    netAmount: number;
+    refundTotal?: number;
+    reversalTotal?: number;
+    currency: string;
+    tags: string[];
+    pendingStatus?: string;
+  }>,
+  offsetKind: "refund" | "reversal"
+): Record<string, unknown> {
+  let pendingDeleteCount = 0;
+  let recordCount = 0;
+  const totalsByCurrency: Record<string, Record<string, number>> = {};
+  const projectMap = new Map<string, { projectName: string; currency: string; net: number; count: number }>();
+  const tagMap = new Map<string, { tag: string; currency: string; net: number; count: number }>();
+
+  for (const item of items) {
+    if (item.pendingStatus === "queued_delete") {
+      pendingDeleteCount += 1;
+      continue;
+    }
+    recordCount += 1;
+    const currency = (item.currency || "UNKNOWN").toUpperCase();
+    const gross = Number(item.amount ?? 0);
+    const offsetAmt = Number((offsetKind === "refund" ? item.refundTotal : item.reversalTotal) ?? 0);
+    const net = Number(item.netAmount ?? gross - offsetAmt);
+
+    const curBucket = totalsByCurrency[currency] ?? { gross: 0, [offsetKind]: 0, net: 0, count: 0 };
+    curBucket.gross = Math.round((curBucket.gross + gross) * 100) / 100;
+    curBucket[offsetKind] = Math.round((curBucket[offsetKind] + offsetAmt) * 100) / 100;
+    curBucket.net = Math.round((curBucket.net + net) * 100) / 100;
+    curBucket.count += 1;
+    totalsByCurrency[currency] = curBucket;
+
+    const projKey = `${item.projectName}\0${currency}`;
+    const projEntry = projectMap.get(projKey) ?? {
+      projectName: item.projectName,
+      currency,
+      net: 0,
+      count: 0
+    };
+    projEntry.net = Math.round((projEntry.net + net) * 100) / 100;
+    projEntry.count += 1;
+    projectMap.set(projKey, projEntry);
+
+    for (const tag of item.tags ?? []) {
+      const tagKey = `${tag}\0${currency}`;
+      const tagEntry = tagMap.get(tagKey) ?? { tag, currency, net: 0, count: 0 };
+      tagEntry.net = Math.round((tagEntry.net + net) * 100) / 100;
+      tagEntry.count += 1;
+      tagMap.set(tagKey, tagEntry);
+    }
+  }
+
+  const byProject = Array.from(projectMap.values())
+    .sort((a, b) => b.net - a.net || b.count - a.count)
+    .slice(0, 10);
+  const byTag = Array.from(tagMap.values())
+    .sort((a, b) => b.net - a.net || b.count - a.count)
+    .slice(0, 10);
+
+  return {
+    recordCount,
+    pendingDeleteCount,
+    totalsByCurrency,
+    byProject,
+    byTag
+  };
+}
+
 export class SxOperations {
   constructor(private readonly ctx: BxStoreContext) {}
 
@@ -104,11 +230,13 @@ export class SxOperations {
     offset?: number;
   } = {}): Promise<Record<string, unknown>> {
     await this.ctx.assertDomainReadAllowed("sx", "projects");
-    const dataset = await this.ctx.readDataset<SxProjectRecord>("sx", "projects");
+    const [dataset, pending] = await Promise.all([
+      this.ctx.readDataset<SxProjectRecord>("sx", "projects"),
+      this.ctx.listPendingEnvelopes("sx")
+    ]);
     const items: SxProjectRecord[] = dataset ? dataset.map((p) => ({ ...p })) : [];
     const byId = new Map(items.map((p) => [p.id, p]));
 
-    const pending = await this.ctx.listPendingEnvelopes("sx");
     for (const env of pending) {
       if (env.op === "create_project") {
         const cashFlow = String(env.payload.cashFlowSides ?? "expenseOnly");
@@ -125,7 +253,7 @@ export class SxOperations {
           supportsIncome: cashFlow === "incomeOnly" || cashFlow === "both",
           startDate: String(env.payload.startDate ?? env.createdAt),
           endDate: typeof env.payload.endDate === "string" ? env.payload.endDate : null,
-          isAutoRenew: env.payload.projectType === "autoRenew",
+          isAutoRenew: typeof env.payload.isAutoRenew === "boolean" ? env.payload.isAutoRenew : env.payload.projectType === "autoRenew",
           notes: String(env.payload.notes ?? ""),
           expenseCount: 0,
           incomeCount: 0,
@@ -139,7 +267,20 @@ export class SxOperations {
           if (typeof env.payload.name === "string") target.name = env.payload.name;
           if (typeof env.payload.price === "number") target.price = env.payload.price;
           if (typeof env.payload.currency === "string") target.currency = env.payload.currency;
-          if (typeof env.payload.projectType === "string") target.projectType = env.payload.projectType;
+          if (typeof env.payload.cycle === "string") target.cycle = env.payload.cycle;
+          if (typeof env.payload.priceType === "string") target.priceType = env.payload.priceType;
+          if (typeof env.payload.projectType === "string") {
+            target.projectType = env.payload.projectType;
+            target.isAutoRenew = env.payload.projectType === "autoRenew";
+          }
+          if (typeof env.payload.cashFlowSides === "string") {
+            target.cashFlowSides = env.payload.cashFlowSides;
+            target.supportsExpense =
+              env.payload.cashFlowSides === "expenseOnly" || env.payload.cashFlowSides === "both";
+            target.supportsIncome =
+              env.payload.cashFlowSides === "incomeOnly" || env.payload.cashFlowSides === "both";
+          }
+          if (typeof env.payload.notes === "string") target.notes = env.payload.notes;
           target.pendingStatus = "queued_update";
         }
       } else if (env.op === "delete_project") {
@@ -186,25 +327,60 @@ export class SxOperations {
     offset?: number;
   } = {}): Promise<Record<string, unknown>> {
     await this.ctx.assertDomainReadAllowed("sx", "expenses");
-    const dataset = await this.ctx.readDataset<SxExpenseRecord>("sx", "expenses");
+    const [dataset, pending, timeZone, catalog] = await Promise.all([
+      this.ctx.readDataset<SxExpenseRecord>("sx", "expenses"),
+      this.ctx.listPendingEnvelopes("sx"),
+      this.ctx.readAppTimeZone?.("sx") ?? Promise.resolve(undefined),
+      this.ctx.readAppCatalog?.<SxCatalog>("sx") ?? Promise.resolve(null)
+    ]);
+
+    const projectCurrencyMap = new Map<string, string>();
+    for (const proj of catalog?.projects ?? []) {
+      if (proj.name && proj.currency) {
+        projectCurrencyMap.set(proj.name.trim().toLowerCase(), proj.currency.trim().toUpperCase());
+      }
+    }
+
     const items: SxExpenseRecord[] = dataset
       ? dataset.map((item) => ({ ...item, refunds: item.refunds?.map((r) => ({ ...r })) }))
       : [];
     const byId = new Map(items.map((item) => [item.id, item]));
+    const refundOwnerById = new Map<number, SxExpenseRecord>();
+    for (const item of items) {
+      for (const refund of item.refunds ?? []) {
+        refundOwnerById.set(refund.id, item);
+      }
+    }
 
-    const pending = await this.ctx.listPendingEnvelopes("sx");
+    const recomputeExpenseRefunds = (expense: SxExpenseRecord) => {
+      const total = (expense.refunds ?? [])
+        .filter((r) => r.pendingStatus !== "queued_delete")
+        .reduce((sum, r) => sum + Number(r.amount ?? 0), 0);
+      expense.refundTotal = Math.round(total * 100) / 100;
+      expense.netAmount = Math.round((expense.amount - expense.refundTotal) * 100) / 100;
+    };
+
     for (const env of pending) {
-      if (env.op === "record_expense") {
+      if (env.op === "create_project") {
+        if (typeof env.payload.name === "string" && typeof env.payload.currency === "string") {
+          projectCurrencyMap.set(env.payload.name.trim().toLowerCase(), env.payload.currency.trim().toUpperCase());
+        }
+      } else if (env.op === "record_expense") {
         const amount = Number(env.payload.amount ?? 0);
+        const projName = String(env.payload.projectName ?? "");
+        const resolvedCurrency =
+          (typeof env.payload.currency === "string" && env.payload.currency.trim()
+            ? env.payload.currency.trim().toUpperCase()
+            : projectCurrencyMap.get(projName.trim().toLowerCase()) ?? catalog?.summaryCurrency ?? "") || "";
         const created: SxExpenseRecord = {
           id: -1,
           projectId: -1,
-          projectName: String(env.payload.projectName ?? ""),
+          projectName: projName,
           credentialId: typeof env.payload.credentialId === "number" ? env.payload.credentialId : undefined,
           amount,
           netAmount: amount,
           refundTotal: 0,
-          currency: String(env.payload.currency ?? ""),
+          currency: resolvedCurrency,
           tags: Array.isArray(env.payload.tags) ? env.payload.tags.map(String) : [],
           notes: String(env.payload.note ?? env.payload.notes ?? ""),
           paidAt: String(env.payload.date ?? env.createdAt),
@@ -217,7 +393,6 @@ export class SxOperations {
         if (target) {
           if (typeof env.payload.amount === "number") {
             target.amount = env.payload.amount;
-            target.netAmount = Math.round((target.amount - target.refundTotal) * 100) / 100;
           }
           if (typeof env.payload.projectName === "string") target.projectName = env.payload.projectName;
           if (typeof env.payload.credentialId === "number") target.credentialId = env.payload.credentialId;
@@ -235,6 +410,7 @@ export class SxOperations {
             target.localHour = undefined;
             target.displayDate = undefined;
           }
+          target.netAmount = Math.round((target.amount - target.refundTotal) * 100) / 100;
           target.pendingStatus = "queued_update";
           target.pendingRequestId = env.requestId;
         }
@@ -244,10 +420,44 @@ export class SxOperations {
           target.pendingStatus = "queued_delete";
           target.pendingRequestId = env.requestId;
         }
+      } else if (env.op === "record_refund") {
+        const parent = byId.get(Number(env.payload.paymentId));
+        if (parent) {
+          if (!parent.refunds) parent.refunds = [];
+          parent.refunds.push({
+            id: -1,
+            paymentId: parent.id,
+            amount: Number(env.payload.amount ?? 0),
+            currency: parent.currency,
+            notes: String(env.payload.note ?? env.payload.notes ?? ""),
+            refundedAt: String(env.payload.date ?? env.createdAt),
+            pendingStatus: "queued_create"
+          });
+          recomputeExpenseRefunds(parent);
+        }
+      } else if (env.op === "update_refund") {
+        const refundId = Number(env.payload.id);
+        const parent = refundOwnerById.get(refundId);
+        const refund = parent?.refunds?.find((r) => r.id === refundId);
+        if (parent && refund) {
+          if (typeof env.payload.amount === "number") refund.amount = env.payload.amount;
+          if (typeof env.payload.note === "string") refund.notes = env.payload.note;
+          else if (typeof env.payload.notes === "string") refund.notes = env.payload.notes;
+          if (typeof env.payload.date === "string") refund.refundedAt = env.payload.date;
+          refund.pendingStatus = "queued_update";
+          recomputeExpenseRefunds(parent);
+        }
+      } else if (env.op === "delete_refund") {
+        const refundId = Number(env.payload.id);
+        const parent = refundOwnerById.get(refundId);
+        const refund = parent?.refunds?.find((r) => r.id === refundId);
+        if (parent && refund) {
+          refund.pendingStatus = "queued_delete";
+          recomputeExpenseRefunds(parent);
+        }
       }
     }
 
-    const timeZone = await this.ctx.readAppTimeZone?.("sx");
     for (const item of items) {
       enrichExpenseLocalFields(item, timeZone);
     }
@@ -272,6 +482,8 @@ export class SxOperations {
     }
     filtered.sort((a, b) => b.paidAt.localeCompare(a.paidAt));
 
+    const aggregates = computeCashFlowAggregates(filtered, "refund");
+
     const includeRefunds = options.includeRefunds !== false;
     if (!includeRefunds) {
       filtered = filtered.map(({ refunds: _r, ...rest }) => rest);
@@ -281,6 +493,7 @@ export class SxOperations {
     return {
       datasetUploaded: dataset !== null,
       timeZoneIdentifier: timeZone ?? null,
+      aggregates,
       ...paginate(filtered, limit, offset)
     };
   }
@@ -298,25 +511,60 @@ export class SxOperations {
     offset?: number;
   } = {}): Promise<Record<string, unknown>> {
     await this.ctx.assertDomainReadAllowed("sx", "incomes");
-    const dataset = await this.ctx.readDataset<SxIncomeRecord>("sx", "incomes");
+    const [dataset, pending, timeZone, catalog] = await Promise.all([
+      this.ctx.readDataset<SxIncomeRecord>("sx", "incomes"),
+      this.ctx.listPendingEnvelopes("sx"),
+      this.ctx.readAppTimeZone?.("sx") ?? Promise.resolve(undefined),
+      this.ctx.readAppCatalog?.<SxCatalog>("sx") ?? Promise.resolve(null)
+    ]);
+
+    const projectCurrencyMap = new Map<string, string>();
+    for (const proj of catalog?.projects ?? []) {
+      if (proj.name && proj.currency) {
+        projectCurrencyMap.set(proj.name.trim().toLowerCase(), proj.currency.trim().toUpperCase());
+      }
+    }
+
     const items: SxIncomeRecord[] = dataset
       ? dataset.map((item) => ({ ...item, reversals: item.reversals?.map((r) => ({ ...r })) }))
       : [];
     const byId = new Map(items.map((item) => [item.id, item]));
+    const reversalOwnerById = new Map<number, SxIncomeRecord>();
+    for (const item of items) {
+      for (const rev of item.reversals ?? []) {
+        reversalOwnerById.set(rev.id, item);
+      }
+    }
 
-    const pending = await this.ctx.listPendingEnvelopes("sx");
+    const recomputeIncomeReversals = (income: SxIncomeRecord) => {
+      const total = (income.reversals ?? [])
+        .filter((r) => r.pendingStatus !== "queued_delete")
+        .reduce((sum, r) => sum + Number(r.amount ?? 0), 0);
+      income.reversalTotal = Math.round(total * 100) / 100;
+      income.netAmount = Math.round((income.amount - income.reversalTotal) * 100) / 100;
+    };
+
     for (const env of pending) {
-      if (env.op === "record_income") {
+      if (env.op === "create_project") {
+        if (typeof env.payload.name === "string" && typeof env.payload.currency === "string") {
+          projectCurrencyMap.set(env.payload.name.trim().toLowerCase(), env.payload.currency.trim().toUpperCase());
+        }
+      } else if (env.op === "record_income") {
         const amount = Number(env.payload.amount ?? 0);
+        const projName = String(env.payload.projectName ?? "");
+        const resolvedCurrency =
+          (typeof env.payload.currency === "string" && env.payload.currency.trim()
+            ? env.payload.currency.trim().toUpperCase()
+            : projectCurrencyMap.get(projName.trim().toLowerCase()) ?? catalog?.summaryCurrency ?? "") || "";
         items.unshift({
           id: -1,
           projectId: -1,
-          projectName: String(env.payload.projectName ?? ""),
+          projectName: projName,
           credentialId: typeof env.payload.credentialId === "number" ? env.payload.credentialId : undefined,
           amount,
           netAmount: amount,
           reversalTotal: 0,
-          currency: String(env.payload.currency ?? ""),
+          currency: resolvedCurrency,
           tags: Array.isArray(env.payload.tags) ? env.payload.tags.map(String) : [],
           notes: String(env.payload.note ?? env.payload.notes ?? ""),
           receivedAt: String(env.payload.date ?? env.createdAt),
@@ -328,7 +576,6 @@ export class SxOperations {
         if (target) {
           if (typeof env.payload.amount === "number") {
             target.amount = env.payload.amount;
-            target.netAmount = Math.round((target.amount - target.reversalTotal) * 100) / 100;
           }
           if (typeof env.payload.projectName === "string") target.projectName = env.payload.projectName;
           if (typeof env.payload.credentialId === "number") target.credentialId = env.payload.credentialId;
@@ -344,6 +591,7 @@ export class SxOperations {
             target.receivedAt = env.payload.date;
             target.localDate = undefined;
           }
+          target.netAmount = Math.round((target.amount - target.reversalTotal) * 100) / 100;
           target.pendingStatus = "queued_update";
           target.pendingRequestId = env.requestId;
         }
@@ -353,10 +601,44 @@ export class SxOperations {
           target.pendingStatus = "queued_delete";
           target.pendingRequestId = env.requestId;
         }
+      } else if (env.op === "record_income_reversal") {
+        const parent = byId.get(Number(env.payload.incomeId));
+        if (parent) {
+          if (!parent.reversals) parent.reversals = [];
+          parent.reversals.push({
+            id: -1,
+            incomeId: parent.id,
+            amount: Number(env.payload.amount ?? 0),
+            currency: parent.currency,
+            notes: String(env.payload.note ?? env.payload.notes ?? ""),
+            reversedAt: String(env.payload.date ?? env.createdAt),
+            pendingStatus: "queued_create"
+          });
+          recomputeIncomeReversals(parent);
+        }
+      } else if (env.op === "update_income_reversal") {
+        const revId = Number(env.payload.id);
+        const parent = reversalOwnerById.get(revId);
+        const rev = parent?.reversals?.find((r) => r.id === revId);
+        if (parent && rev) {
+          if (typeof env.payload.amount === "number") rev.amount = env.payload.amount;
+          if (typeof env.payload.note === "string") rev.notes = env.payload.note;
+          else if (typeof env.payload.notes === "string") rev.notes = env.payload.notes;
+          if (typeof env.payload.date === "string") rev.reversedAt = env.payload.date;
+          rev.pendingStatus = "queued_update";
+          recomputeIncomeReversals(parent);
+        }
+      } else if (env.op === "delete_income_reversal") {
+        const revId = Number(env.payload.id);
+        const parent = reversalOwnerById.get(revId);
+        const rev = parent?.reversals?.find((r) => r.id === revId);
+        if (parent && rev) {
+          rev.pendingStatus = "queued_delete";
+          recomputeIncomeReversals(parent);
+        }
       }
     }
 
-    const timeZone = await this.ctx.readAppTimeZone?.("sx");
     for (const item of items) {
       if (!item.localDate) {
         const key = localDateKey(item.receivedAt, timeZone);
@@ -386,6 +668,8 @@ export class SxOperations {
     }
     filtered.sort((a, b) => b.receivedAt.localeCompare(a.receivedAt));
 
+    const aggregates = computeCashFlowAggregates(filtered, "reversal");
+
     if (options.includeReversals === false) {
       filtered = filtered.map(({ reversals: _r, ...rest }) => rest);
     }
@@ -394,17 +678,20 @@ export class SxOperations {
     return {
       datasetUploaded: dataset !== null,
       timeZoneIdentifier: timeZone ?? null,
+      aggregates,
       ...paginate(filtered, limit, offset)
     };
   }
 
   async listTags(options: { query?: string } = {}): Promise<Record<string, unknown>> {
     await this.ctx.assertDomainReadAllowed("sx", "tags");
-    const dataset = await this.ctx.readDataset<SxTagRecord>("sx", "tags");
+    const [dataset, pending] = await Promise.all([
+      this.ctx.readDataset<SxTagRecord>("sx", "tags"),
+      this.ctx.listPendingEnvelopes("sx")
+    ]);
     const items: SxTagRecord[] = dataset ? dataset.map((t) => ({ ...t })) : [];
     const byId = new Map(items.map((t) => [t.id, t]));
 
-    const pending = await this.ctx.listPendingEnvelopes("sx");
     for (const env of pending) {
       if (env.op === "create_tag") {
         items.push({
@@ -445,11 +732,13 @@ export class SxOperations {
     offset?: number;
   } = {}): Promise<Record<string, unknown>> {
     await this.ctx.assertDomainReadAllowed("sx", "slogans");
-    const dataset = await this.ctx.readDataset<SxSloganRecord>("sx", "slogans");
+    const [dataset, pending] = await Promise.all([
+      this.ctx.readDataset<SxSloganRecord>("sx", "slogans"),
+      this.ctx.listPendingEnvelopes("sx")
+    ]);
     const items: SxSloganRecord[] = dataset ? dataset.map((s) => ({ ...s })) : [];
     const byId = new Map(items.map((s) => [s.id, s]));
 
-    const pending = await this.ctx.listPendingEnvelopes("sx");
     for (const env of pending) {
       if (env.op === "create_slogan") {
         items.unshift({
@@ -467,6 +756,11 @@ export class SxOperations {
         const target = byId.get(Number(env.payload.id));
         if (target) {
           if (typeof env.payload.text === "string") target.text = env.payload.text;
+          if (typeof env.payload.language === "string") target.language = env.payload.language;
+          if (typeof env.payload.emoji === "string") target.emoji = env.payload.emoji || null;
+          if (typeof env.payload.ruleType === "string") target.ruleType = env.payload.ruleType;
+          if (typeof env.payload.ruleValue === "string") target.ruleValue = env.payload.ruleValue;
+          if (typeof env.payload.priority === "number") target.priority = env.payload.priority;
           if (typeof env.payload.isEnabled === "boolean") target.isEnabled = env.payload.isEnabled;
           target.pendingStatus = "queued_update";
         }
@@ -553,36 +847,7 @@ export class SxOperations {
     const timeZone = catalogTimeZone(catalog, fallbackTimeZone);
     const normalizedCurrency = normalizeCurrencyCode(input.currency, catalog);
 
-    let normalizedProject = rawProject;
-    const match = catalog?.projects?.find((proj) => proj.name.trim().toLowerCase() === rawProject.toLowerCase());
-    if (match) {
-      if (mode === "expense" && match.supportsExpense === false) {
-        throw new Error(`Project '${match.name}' does not support expense records.`);
-      }
-      if (mode === "income" && match.supportsIncome === false) {
-        throw new Error(`Project '${match.name}' does not support income records.`);
-      }
-      normalizedProject = match.name;
-    } else {
-      const pendingMatch = pendingProjects.find((proj) => proj.name.toLowerCase() === rawProject.toLowerCase());
-      if (pendingMatch) {
-        const supportsExpense = pendingMatch.cashFlowSides === "expenseOnly" || pendingMatch.cashFlowSides === "both";
-        const supportsIncome = pendingMatch.cashFlowSides === "incomeOnly" || pendingMatch.cashFlowSides === "both";
-        if (mode === "expense" && !supportsExpense) {
-          throw new Error(`Project '${pendingMatch.name}' does not support expense records.`);
-        }
-        if (mode === "income" && !supportsIncome) {
-          throw new Error(`Project '${pendingMatch.name}' does not support income records.`);
-        }
-        normalizedProject = pendingMatch.name;
-      } else if (catalog?.projects?.length) {
-        const names = [
-          ...catalog.projects.map((proj) => proj.name),
-          ...pendingProjects.map((proj) => proj.name)
-        ].join(", ");
-        throw new Error(`Unknown projectName '${rawProject}'. Known projects: ${names}`);
-      }
-    }
+    const normalizedProject = resolveKnownProjectName(rawProject, mode, catalog, pendingProjects);
 
     const isoDate = resolveSxTimestamp(input.date, "date", {
       timeZone,
@@ -640,8 +905,74 @@ export class SxOperations {
     return localTime && result.queued === true ? { ...result, resolvedLocalTime: localTime } : result;
   }
 
+  private async resolvePendingSxTarget(
+    domain: "expenses" | "incomes",
+    mode: "update" | "delete",
+    input: { id?: number; pendingRequestId?: string },
+    expectedCreateOp: "record_expense" | "record_income"
+  ): Promise<
+    | { kind: "committed"; id: number; resolvedFromSyncedReceipt?: boolean }
+    | { kind: "pending"; requestId: string; envelope: InboxEnvelope }
+  > {
+    const reqId = input.pendingRequestId?.trim();
+    if (reqId) {
+      const pending = await this.ctx.findPendingEnvelope?.("sx", reqId);
+      if (pending) {
+        if (pending.op !== expectedCreateOp) {
+          throw new Error(
+            `Pending request '${reqId}' is '${pending.op}', expected '${expectedCreateOp}'.`
+          );
+        }
+        if (this.ctx.assertReadAccess) {
+          const { row, policy } = await this.ctx.assertReadAccess("sx");
+          if (row && policy) {
+            if (row.permission === "disabled") {
+              throw new Error("App 'sx' is paused ('disabled'). Enable permissions in SX Settings -> AI Assistant.");
+            }
+            if (!policy.allowedDomains.includes(domain)) {
+              throw new Error(`Category '${domain}' is turned off by user policy in SX.`);
+            }
+            if (mode === "update" && !policy.allowUpdate && !policy.allowCreate) {
+              throw new Error("SX permission policy does not allow updating this queued entry.");
+            }
+            if (mode === "delete" && !policy.allowDelete && !policy.allowCreate) {
+              throw new Error("SX permission policy does not allow cancelling this queued entry.");
+            }
+          }
+        }
+        return { kind: "pending", requestId: reqId, envelope: pending };
+      }
+
+      const receipt = await this.ctx.lookupReceiptByRequestId?.("sx", reqId);
+      if (receipt?.status === "applied" && receipt.recordId) {
+        const numericId = Number(receipt.recordId);
+        if (Number.isInteger(numericId) && numericId > 0) {
+          await this.ctx.assertActionAllowed("sx", mode, domain);
+          return { kind: "committed", id: numericId, resolvedFromSyncedReceipt: true };
+        }
+      }
+      if (receipt) {
+        throw new Error(
+          `Request '${reqId}' already processed with status '${receipt.status}'${receipt.errorMessage ? `: ${receipt.errorMessage}` : ""}.`
+        );
+      }
+      throw new Error(`Pending SX request '${reqId}' was not found in inbox or synced receipts.`);
+    }
+
+    if (input.id === -1) {
+      throw new Error(
+        `'id' cannot be -1 directly; pass 'pendingRequestId' from ${domain === "expenses" ? "sx_list_expenses" : "sx_list_incomes"} to ${mode} a queued un-synced entry.`
+      );
+    }
+
+    const id = validateId(input.id, "id");
+    await this.ctx.assertActionAllowed("sx", mode, domain);
+    return { kind: "committed", id };
+  }
+
   async updateExpense(input: {
-    id: number;
+    id?: number;
+    pendingRequestId?: string;
     amount?: number;
     projectName?: string;
     credentialId?: number;
@@ -655,49 +986,64 @@ export class SxOperations {
     requestId?: string;
     client?: string;
   }): Promise<Record<string, unknown>> {
-    const state = await this.ctx.assertActionAllowed("sx", "update", "expenses");
-    const id = validateId(input.id, "id");
-    const payload: Record<string, unknown> = { id };
-    const catalog = safeJsonParse<SxCatalog>(state.catalog_json);
-    const timeZone = catalogTimeZone(catalog, await this.ctx.readAppTimeZone?.("sx"));
+    const target = await this.resolvePendingSxTarget("expenses", "update", input, "record_expense");
+    const [catalog, pendingProjects, fallbackTz] = await Promise.all([
+      this.ctx.readAppCatalog?.<SxCatalog>("sx") ?? Promise.resolve(null),
+      input.projectName !== undefined ? this.listPendingCreatedProjects() : Promise.resolve([]),
+      this.ctx.readAppTimeZone?.("sx") ?? Promise.resolve(undefined)
+    ]);
+    const timeZone = catalogTimeZone(catalog, fallbackTz);
 
+    const updates: Record<string, unknown> = {};
+    let clearCredentialFlag = false;
     if (input.credentialId !== undefined || input.clearCredential === true) {
       await this.ctx.assertActionDomainAllowed?.("sx", "credentials");
       if (input.credentialId !== undefined) {
-        payload.credentialId = validateId(input.credentialId, "credentialId");
+        updates.credentialId = validateId(input.credentialId, "credentialId");
       }
       if (input.clearCredential === true) {
-        payload.clearCredential = true;
+        updates.clearCredential = true;
+        clearCredentialFlag = true;
       }
     }
     if (input.amount !== undefined) {
       if (!Number.isFinite(input.amount) || input.amount <= 0) {
         throw new Error("SX 'amount' must be > 0.");
       }
-      payload.amount = Math.round(input.amount * 100) / 100;
+      updates.amount = Math.round(input.amount * 100) / 100;
     }
     if (input.projectName !== undefined) {
-      payload.projectName = requireNonEmptyString(input.projectName, "projectName");
+      const rawProject = requireNonEmptyString(input.projectName, "projectName");
+      updates.projectName = resolveKnownProjectName(rawProject, "expense", catalog, pendingProjects);
     }
     if (input.currency !== undefined) {
       const normalized = normalizeCurrencyCode(input.currency, catalog);
-      if (normalized) payload.currency = normalized;
+      if (normalized) updates.currency = normalized;
     }
     const tags = normalizeTagsArray(input.tags);
-    if (tags !== undefined) payload.tags = tags;
+    if (tags !== undefined) updates.tags = tags;
     const resolvedNote = input.note !== undefined ? input.note : input.notes;
-    if (resolvedNote !== undefined) payload.note = resolvedNote.trim();
+    if (resolvedNote !== undefined) updates.note = resolvedNote.trim();
 
     let isoDate: string | undefined;
     const hasHourInput = input.hour !== undefined && input.hour !== null;
     if (hasHourInput && !input.date?.trim()) {
       const hour = validateLocalHour(input.hour);
-      const existing = await this.findExpenseForUpdate(id);
-      const existingLocalDate =
-        existing?.localDate?.trim() || localDateHourParts(existing?.paidAt, timeZone)?.localDate;
+      let existingLocalDate: string | undefined;
+      if (target.kind === "pending") {
+        const refIso =
+          typeof target.envelope.payload.date === "string"
+            ? target.envelope.payload.date
+            : target.envelope.createdAt;
+        existingLocalDate = localDateHourParts(refIso, timeZone)?.localDate;
+      } else {
+        const existing = await this.findExpenseForUpdate(target.id);
+        existingLocalDate =
+          existing?.localDate?.trim() || localDateHourParts(existing?.paidAt, timeZone)?.localDate;
+      }
       if (!existingLocalDate) {
         throw new Error(
-          `Cannot update 'hour' alone because expense #${id} is not in the synced snapshot yet. Please provide 'date' (e.g. 'YYYY-MM-DD') together with 'hour'.`
+          `Cannot update 'hour' alone because expense #${target.kind === "committed" ? target.id : target.requestId} is not in the synced snapshot yet. Please provide 'date' (e.g. 'YYYY-MM-DD') together with 'hour'.`
         );
       }
       isoDate = resolveSxTimestamp(existingLocalDate, "date", {
@@ -714,24 +1060,69 @@ export class SxOperations {
         allowHourOnly: false
       });
     }
-    if (isoDate) payload.date = isoDate;
+    if (isoDate) updates.date = isoDate;
 
-    if (Object.keys(payload).length === 1) {
+    if (Object.keys(updates).length === 0) {
       throw new Error("update_expense requires at least one field to update.");
     }
+
+    if (target.kind === "pending" && this.ctx.updatePendingEnvelopePayload) {
+      const nextPayload: Record<string, unknown> = { ...target.envelope.payload, ...updates };
+      if (clearCredentialFlag) {
+        delete nextPayload.credentialId;
+        delete nextPayload.clearCredential;
+      }
+      await this.ctx.updatePendingEnvelopePayload("sx", target.requestId, nextPayload);
+      const effectiveDate = typeof nextPayload.date === "string" ? nextPayload.date : undefined;
+      const localTime = resolvedLocalTimeMeta(effectiveDate, timeZone);
+      return {
+        queued: true,
+        updatedPending: true,
+        app: "sx",
+        op: "update_expense",
+        requestId: target.requestId,
+        normalizedPayload: nextPayload,
+        ...(localTime ? { resolvedLocalTime: localTime } : {})
+      };
+    }
+
+    const resolvedId = target.kind === "committed" ? target.id : -1;
+    const payload: Record<string, unknown> = { id: resolvedId, ...updates };
     const requestId = input.requestId?.trim() || generateRequestId("sx-exp-upd");
     const result = await this.ctx.enqueueInbox("sx", "update_expense", requestId, input.client, payload);
     const normalizedPayload = result.normalizedPayload as Record<string, unknown> | undefined;
     const effectiveDate = typeof normalizedPayload?.date === "string" ? normalizedPayload.date : undefined;
     const localTime = resolvedLocalTimeMeta(effectiveDate, timeZone);
-    return localTime && result.queued === true ? { ...result, resolvedLocalTime: localTime } : result;
+    return {
+      ...result,
+      ...(localTime && result.queued === true ? { resolvedLocalTime: localTime } : {}),
+      ...(target.kind === "committed" && target.resolvedFromSyncedReceipt ? { resolvedFromSyncedReceipt: true } : {})
+    };
   }
 
-  async deleteExpense(input: { id: number; requestId?: string; client?: string }): Promise<Record<string, unknown>> {
-    await this.ctx.assertActionAllowed("sx", "delete", "expenses");
-    const id = validateId(input.id, "id");
+  async deleteExpense(input: {
+    id?: number;
+    pendingRequestId?: string;
+    requestId?: string;
+    client?: string;
+  }): Promise<Record<string, unknown>> {
+    const target = await this.resolvePendingSxTarget("expenses", "delete", input, "record_expense");
+    if (target.kind === "pending" && this.ctx.deletePendingEnvelope) {
+      await this.ctx.deletePendingEnvelope("sx", target.requestId);
+      return {
+        queued: false,
+        cancelledPending: true,
+        app: "sx",
+        op: "record_expense",
+        requestId: target.requestId
+      };
+    }
+    const id = target.kind === "committed" ? target.id : validateId(input.id, "id");
     const requestId = input.requestId?.trim() || generateRequestId("sx-exp-del");
-    return this.ctx.enqueueInbox("sx", "delete_expense", requestId, input.client, { id });
+    const res = await this.ctx.enqueueInbox("sx", "delete_expense", requestId, input.client, { id });
+    return target.kind === "committed" && target.resolvedFromSyncedReceipt
+      ? { ...res, resolvedFromSyncedReceipt: true }
+      : res;
   }
 
   async recordRefund(input: {
@@ -831,7 +1222,8 @@ export class SxOperations {
   }
 
   async updateIncome(input: {
-    id: number;
+    id?: number;
+    pendingRequestId?: string;
     amount?: number;
     projectName?: string;
     credentialId?: number;
@@ -844,47 +1236,95 @@ export class SxOperations {
     requestId?: string;
     client?: string;
   }): Promise<Record<string, unknown>> {
-    const state = await this.ctx.assertActionAllowed("sx", "update", "incomes");
-    const id = validateId(input.id, "id");
-    const payload: Record<string, unknown> = { id };
-    const catalog = safeJsonParse<SxCatalog>(state.catalog_json);
-    const timeZone = catalogTimeZone(catalog, await this.ctx.readAppTimeZone?.("sx"));
+    const target = await this.resolvePendingSxTarget("incomes", "update", input, "record_income");
+    const [catalog, pendingProjects, fallbackTz] = await Promise.all([
+      this.ctx.readAppCatalog?.<SxCatalog>("sx") ?? Promise.resolve(null),
+      input.projectName !== undefined ? this.listPendingCreatedProjects() : Promise.resolve([]),
+      this.ctx.readAppTimeZone?.("sx") ?? Promise.resolve(undefined)
+    ]);
+    const timeZone = catalogTimeZone(catalog, fallbackTz);
 
+    const updates: Record<string, unknown> = {};
+    let clearCredentialFlag = false;
     if (input.credentialId !== undefined || input.clearCredential === true) {
       await this.ctx.assertActionDomainAllowed?.("sx", "credentials");
       if (input.credentialId !== undefined) {
-        payload.credentialId = validateId(input.credentialId, "credentialId");
+        updates.credentialId = validateId(input.credentialId, "credentialId");
       }
       if (input.clearCredential === true) {
-        payload.clearCredential = true;
+        updates.clearCredential = true;
+        clearCredentialFlag = true;
       }
     }
     if (input.amount !== undefined) {
       if (!Number.isFinite(input.amount) || input.amount <= 0) throw new Error("SX 'amount' must be > 0.");
-      payload.amount = Math.round(input.amount * 100) / 100;
+      updates.amount = Math.round(input.amount * 100) / 100;
     }
-    if (input.projectName !== undefined) payload.projectName = requireNonEmptyString(input.projectName, "projectName");
+    if (input.projectName !== undefined) {
+      const rawProject = requireNonEmptyString(input.projectName, "projectName");
+      updates.projectName = resolveKnownProjectName(rawProject, "income", catalog, pendingProjects);
+    }
     if (input.currency !== undefined) {
       const normalized = normalizeCurrencyCode(input.currency, catalog);
-      if (normalized) payload.currency = normalized;
+      if (normalized) updates.currency = normalized;
     }
     const tags = normalizeTagsArray(input.tags);
-    if (tags !== undefined) payload.tags = tags;
+    if (tags !== undefined) updates.tags = tags;
     const resolvedNote = input.note !== undefined ? input.note : input.notes;
-    if (resolvedNote !== undefined) payload.note = resolvedNote.trim();
+    if (resolvedNote !== undefined) updates.note = resolvedNote.trim();
     const isoDate = resolveSxTimestamp(input.date, "date", { timeZone, defaultLocalHour: 0 });
-    if (isoDate) payload.date = isoDate;
-    if (Object.keys(payload).length === 1) throw new Error("update_income requires at least one field to update.");
+    if (isoDate) updates.date = isoDate;
+    if (Object.keys(updates).length === 0) throw new Error("update_income requires at least one field to update.");
 
+    if (target.kind === "pending" && this.ctx.updatePendingEnvelopePayload) {
+      const nextPayload: Record<string, unknown> = { ...target.envelope.payload, ...updates };
+      if (clearCredentialFlag) {
+        delete nextPayload.credentialId;
+        delete nextPayload.clearCredential;
+      }
+      await this.ctx.updatePendingEnvelopePayload("sx", target.requestId, nextPayload);
+      return {
+        queued: true,
+        updatedPending: true,
+        app: "sx",
+        op: "update_income",
+        requestId: target.requestId,
+        normalizedPayload: nextPayload
+      };
+    }
+
+    const resolvedId = target.kind === "committed" ? target.id : -1;
+    const payload: Record<string, unknown> = { id: resolvedId, ...updates };
     const requestId = input.requestId?.trim() || generateRequestId("sx-inc-upd");
-    return this.ctx.enqueueInbox("sx", "update_income", requestId, input.client, payload);
+    const res = await this.ctx.enqueueInbox("sx", "update_income", requestId, input.client, payload);
+    return target.kind === "committed" && target.resolvedFromSyncedReceipt
+      ? { ...res, resolvedFromSyncedReceipt: true }
+      : res;
   }
 
-  async deleteIncome(input: { id: number; requestId?: string; client?: string }): Promise<Record<string, unknown>> {
-    await this.ctx.assertActionAllowed("sx", "delete", "incomes");
-    const id = validateId(input.id, "id");
+  async deleteIncome(input: {
+    id?: number;
+    pendingRequestId?: string;
+    requestId?: string;
+    client?: string;
+  }): Promise<Record<string, unknown>> {
+    const target = await this.resolvePendingSxTarget("incomes", "delete", input, "record_income");
+    if (target.kind === "pending" && this.ctx.deletePendingEnvelope) {
+      await this.ctx.deletePendingEnvelope("sx", target.requestId);
+      return {
+        queued: false,
+        cancelledPending: true,
+        app: "sx",
+        op: "record_income",
+        requestId: target.requestId
+      };
+    }
+    const id = target.kind === "committed" ? target.id : validateId(input.id, "id");
     const requestId = input.requestId?.trim() || generateRequestId("sx-inc-del");
-    return this.ctx.enqueueInbox("sx", "delete_income", requestId, input.client, { id });
+    const res = await this.ctx.enqueueInbox("sx", "delete_income", requestId, input.client, { id });
+    return target.kind === "committed" && target.resolvedFromSyncedReceipt
+      ? { ...res, resolvedFromSyncedReceipt: true }
+      : res;
   }
 
   async recordIncomeReversal(input: {
@@ -1173,20 +1613,26 @@ export class SxOperations {
     offset?: number;
   } = {}): Promise<Record<string, unknown>> {
     await this.ctx.assertDomainReadAllowed("sx", "credentials");
-    const dataset = await this.ctx.readDataset<SxCredentialRecord>("sx", "credentials");
+    const [dataset, pending, projectsDataset] = await Promise.all([
+      this.ctx.readDataset<SxCredentialRecord>("sx", "credentials"),
+      this.ctx.listPendingEnvelopes("sx"),
+      this.ctx.readDataset<SxProjectRecord>("sx", "projects")
+    ]);
+    const projectNameById = new Map((projectsDataset ?? []).map((p) => [p.id, p.name]));
     const items: SxCredentialRecord[] = dataset
       ? dataset.map((cred) => ({ ...cred, links: cred.links?.map((link) => ({ ...link })) ?? [] }))
       : [];
     const byId = new Map(items.map((cred) => [cred.id, cred]));
 
-    const pending = await this.ctx.listPendingEnvelopes("sx");
     for (const env of pending) {
       if (env.op === "create_credential") {
         const linkedProjId = typeof env.payload.projectId === "number" ? env.payload.projectId : null;
         const linkedProjName =
           typeof env.payload.projectName === "string" && env.payload.projectName.trim()
             ? env.payload.projectName.trim()
-            : null;
+            : linkedProjId !== null
+              ? projectNameById.get(linkedProjId) ?? null
+              : null;
         const hasLink = linkedProjId !== null || linkedProjName !== null;
         const links = hasLink
           ? [
@@ -1232,6 +1678,59 @@ export class SxOperations {
         const target = byId.get(Number(env.payload.id));
         if (target) {
           target.pendingStatus = "queued_delete";
+          target.pendingRequestId = env.requestId;
+        }
+      } else if (env.op === "link_credential") {
+        const target = byId.get(Number(env.payload.credentialId));
+        const projId = Number(env.payload.projectId);
+        if (target && Number.isInteger(projId)) {
+          const existingIdx = target.links.findIndex((l) => l.projectId === projId);
+          const nextLink = {
+            projectId: projId,
+            projectName: projectNameById.get(projId) ?? "",
+            startDate: typeof env.payload.startDate === "string" ? env.payload.startDate : env.createdAt,
+            hasStartDate: Boolean(
+              env.payload.hasStartDate ??
+                (env.payload.startDate !== undefined || env.payload.isAutoRenew === true)
+            ),
+            endDate: typeof env.payload.endDate === "string" ? env.payload.endDate : null,
+            isAutoRenew: Boolean(env.payload.isAutoRenew),
+            nextRenewalDate: typeof env.payload.nextRenewalDate === "string" ? env.payload.nextRenewalDate : null,
+            renewalHour: typeof env.payload.renewalHour === "number" ? env.payload.renewalHour : 0,
+            renewalWeekdays: typeof env.payload.renewalWeekdays === "number" ? env.payload.renewalWeekdays : 127
+          };
+          if (existingIdx >= 0) target.links[existingIdx] = nextLink;
+          else target.links.push(nextLink);
+          target.linkCount = target.links.length;
+          target.pendingStatus = "queued_update";
+          target.pendingRequestId = env.requestId;
+        }
+      } else if (env.op === "update_credential_link") {
+        const target = byId.get(Number(env.payload.credentialId));
+        const projId = Number(env.payload.projectId);
+        const link = target?.links.find((l) => l.projectId === projId);
+        if (target && link) {
+          if (typeof env.payload.startDate === "string") link.startDate = env.payload.startDate;
+          if (typeof env.payload.hasStartDate === "boolean") link.hasStartDate = env.payload.hasStartDate;
+          if (env.payload.clearEndDate === true) link.endDate = null;
+          else if (typeof env.payload.endDate === "string") link.endDate = env.payload.endDate;
+          if (typeof env.payload.isAutoRenew === "boolean") link.isAutoRenew = env.payload.isAutoRenew;
+          if (env.payload.clearNextRenewalDate === true) link.nextRenewalDate = null;
+          else if (typeof env.payload.nextRenewalDate === "string") {
+            link.nextRenewalDate = env.payload.nextRenewalDate;
+          }
+          if (typeof env.payload.renewalHour === "number") link.renewalHour = env.payload.renewalHour;
+          if (typeof env.payload.renewalWeekdays === "number") link.renewalWeekdays = env.payload.renewalWeekdays;
+          target.pendingStatus = "queued_update";
+          target.pendingRequestId = env.requestId;
+        }
+      } else if (env.op === "unlink_credential") {
+        const target = byId.get(Number(env.payload.credentialId));
+        const projId = Number(env.payload.projectId);
+        if (target) {
+          target.links = target.links.filter((l) => l.projectId !== projId);
+          target.linkCount = target.links.length;
+          target.pendingStatus = "queued_update";
           target.pendingRequestId = env.requestId;
         }
       }

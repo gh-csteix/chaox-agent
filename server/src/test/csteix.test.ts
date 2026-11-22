@@ -559,3 +559,150 @@ test("supports idempotent /sync/csteix/wuxu/import before phone connects, delta 
   assert.equal(afterWipe.data.totalCount, 0);
   assert.equal((afterWipe.data.articles as unknown[]).length, 0);
 });
+
+test("exposes chaox://wuxu/{slug} MCP resource template, enforces read policy, and batches >80 slug imports", async () => {
+  const { env } = makeEnv();
+  await connectCsteix(env);
+
+  const tplRes = await callJson(env, "/mcp", {
+    method: "POST",
+    body: { jsonrpc: "2.0", id: 500, method: "resources/templates/list" }
+  });
+  const templates = (tplRes.data.result as { resourceTemplates: Array<{ uriTemplate: string }> }).resourceTemplates;
+  assert.equal(templates.length, 1);
+  assert.equal(templates[0].uriTemplate, "chaox://wuxu/{slug}");
+
+  await callJson(env, "/mcp", {
+    method: "POST",
+    body: {
+      jsonrpc: "2.0",
+      id: 501,
+      method: "tools/call",
+      params: {
+        name: "csteix_create_wuxu",
+        arguments: {
+          slug: "resource-test-entry",
+          title: "Resource Read Entry",
+          dimensions: ["chaos", "ix"],
+          writtenAt: "2026-11-22 09:00",
+          bodyZh: "## Passage\n\nWhen the wind settles.\n\n## Lines that stayed\n\n- Only this line.",
+          rawNotes: "Verbatim raw note line."
+        }
+      }
+    }
+  });
+
+  const readRes = await callJson(env, "/mcp", {
+    method: "POST",
+    body: {
+      jsonrpc: "2.0",
+      id: 502,
+      method: "resources/read",
+      params: { uri: "chaox://wuxu/resource-test-entry" }
+    }
+  });
+  const contents = (readRes.data.result as { contents: Array<{ mimeType: string; text: string }> }).contents;
+  assert.equal(contents[0].mimeType, "text/markdown");
+  assert.match(contents[0].text, /# Resource Read Entry/);
+  assert.match(contents[0].text, /When the wind settles/);
+  assert.match(contents[0].text, /## Raw Notes/);
+
+  // Batch import > 85 articles exercises chunked slug IN lookup (> 80 per chunk).
+  const batchArticles = Array.from({ length: 85 }, (_, idx) => ({
+    slug: `batch-note-${String(idx + 1).padStart(3, "0")}`,
+    title: `Batch ${idx + 1}`,
+    dimensions: ["existence"],
+    writtenAt: "2026-11-22T12:00:00.000Z",
+    timezone: "Asia/Shanghai",
+    bodyZh: `Body ${idx + 1}`
+  }));
+  const batchImport = await callJson(env, "/sync/csteix/wuxu/import", {
+    method: "POST",
+    body: { articles: batchArticles }
+  });
+  assert.equal(batchImport.status, 200);
+  assert.equal(batchImport.data.inserted, 85);
+
+  const reImport = await callJson(env, "/sync/csteix/wuxu/import", {
+    method: "POST",
+    body: { articles: batchArticles }
+  });
+  assert.equal(reImport.status, 200);
+  assert.equal(reImport.data.unchanged, 85);
+
+  // Turning off read access must block chaox://wuxu/{slug}.
+  await connectCsteix(env, {
+    permission: "disabled",
+    policy: {
+      allowRead: false,
+      allowCreate: false,
+      allowUpdate: false,
+      allowDelete: false,
+      allowedDomains: ["wuxu"],
+      consentAcknowledged: true
+    }
+  });
+  const deniedRead = await callJson(env, "/mcp", {
+    method: "POST",
+    body: {
+      jsonrpc: "2.0",
+      id: 503,
+      method: "resources/read",
+      params: { uri: "chaox://wuxu/resource-test-entry" }
+    }
+  });
+  assert.equal((deniedRead.data.error as { code: number }).code, -32602);
+});
+
+test("prevents ghost applied receipt when csteix_wuxu loses a concurrent conditional UPDATE", async () => {
+  const { env, db } = makeEnv();
+  await connectCsteix(env);
+
+  const created = await callMcpTool(env, "csteix_create_wuxu", {
+    slug: "race-check-note",
+    title: "Concurrency Check",
+    dimensions: ["ix"],
+    bodyZh: "Initial content",
+    requestId: "wuxu-race-create"
+  });
+  assert.equal(created.isError, false);
+
+  // Wrap db.prepare so any conditional UPDATE on csteix_wuxu simulates another writer
+  // advancing the revision between the pre-read and UPDATE (returns changes: 0).
+  const proxiedEnv: ServerEnv = {
+    ...env,
+    DB: {
+      prepare(query: string) {
+        const inner = db.prepare(query);
+        if (/UPDATE\s+csteix_wuxu\b/i.test(query)) {
+          return {
+            bind(...values: unknown[]) {
+              inner.bind(...values);
+              return this;
+            },
+            first: (...args: unknown[]) => inner.first(...(args as [])),
+            all: () => inner.all(),
+            async run() {
+              return { meta: { changes: 0 } };
+            }
+          };
+        }
+        return inner;
+      },
+      batch: (stmts) => db.batch(stmts)
+    }
+  };
+
+  const raceUpd = await callMcpTool(proxiedEnv, "csteix_update_wuxu", {
+    slug: "race-check-note",
+    appendBodyZh: "Conflicting write",
+    requestId: "wuxu-race-update"
+  });
+  assert.equal(raceUpd.isError, true);
+  assert.match(raceUpd.text, /changed concurrently/);
+
+  const ghostReceipt = await db
+    .prepare("SELECT * FROM receipts WHERE request_id = 'wuxu-race-update'")
+    .first();
+  assert.equal(ghostReceipt, null);
+});

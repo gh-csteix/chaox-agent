@@ -11,7 +11,7 @@ function makeEnv(token = "secret-worker-token"): WorkerEnv {
   };
 }
 
-test("Cloudflare Worker thin adapter preserves cloudflare-d1 mode, serverInfo, auth, and 67 MCP tools", async () => {
+test("Cloudflare Worker thin adapter preserves cloudflare-d1 mode, serverInfo, auth, and 72 MCP tools", async () => {
   const env = makeEnv();
 
   const healthRes = await worker.fetch(new Request("https://chaox-test.workers.dev/health"), env);
@@ -56,7 +56,20 @@ test("Cloudflare Worker thin adapter preserves cloudflare-d1 mode, serverInfo, a
     env
   );
   const toolsJson = (await toolsRes.json()) as { result: { tools: unknown[] } };
-  assert.equal(toolsJson.result.tools.length, 67);
+  assert.equal(toolsJson.result.tools.length, 72);
+
+  const scopedRes = await worker.fetch(
+    new Request("https://chaox-test.workers.dev/mcp?apps=bx&readonly=1", {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({ jsonrpc: "2.0", id: 20, method: "tools/list", params: {} })
+    }),
+    env
+  );
+  const scopedJson = (await scopedRes.json()) as { result: { tools: Array<{ name: string }> } };
+  assert.ok(scopedJson.result.tools.some((t) => t.name === "bx_list_sleep"));
+  assert.ok(!scopedJson.result.tools.some((t) => t.name === "sx_list_expenses"));
+  assert.ok(!scopedJson.result.tools.some((t) => t.name === "bx_record_food"));
 
   const statusRes = await worker.fetch(
     new Request("https://chaox-test.workers.dev/mcp", {

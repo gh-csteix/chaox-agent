@@ -1,12 +1,14 @@
 import http from "node:http";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
+import { gzipSync } from "node:zlib";
 import { handleRequest } from "./app.js";
 import { SqliteDatabase } from "./sqlite.js";
 
 const DEFAULT_PORT = 8787;
 const DEFAULT_HOST = "0.0.0.0";
 const DEFAULT_MAX_BODY_BYTES = 20 * 1024 * 1024; // 20 MiB
+const GZIP_MIN_BYTES = 1024;
 
 class PayloadTooLargeError extends Error {
   constructor(maxBytes: number) {
@@ -125,7 +127,8 @@ function readRequestBody(req: http.IncomingMessage, maxBytes: number): Promise<B
 async function writeWebResponse(
   res: http.ServerResponse,
   webResponse: Response,
-  requestMethod: string
+  requestMethod: string,
+  acceptEncoding?: string
 ): Promise<void> {
   res.statusCode = webResponse.status;
   if (webResponse.statusText) {
@@ -147,8 +150,25 @@ async function writeWebResponse(
     return;
   }
 
-  const bodyBytes = Buffer.from(await webResponse.arrayBuffer());
-  res.end(bodyBytes);
+  const rawBytes = Buffer.from(await webResponse.arrayBuffer());
+  const acceptsGzip = Boolean(acceptEncoding && /\bgzip\b/i.test(acceptEncoding));
+  const alreadyEncoded = webResponse.headers.has("content-encoding");
+  if (acceptsGzip && !alreadyEncoded && rawBytes.length >= GZIP_MIN_BYTES) {
+    const compressed = gzipSync(rawBytes);
+    const existingVary = webResponse.headers.get("vary");
+    res.setHeader("Content-Encoding", "gzip");
+    res.setHeader(
+      "Vary",
+      existingVary && !/\baccept-encoding\b/i.test(existingVary)
+        ? `${existingVary}, Accept-Encoding`
+        : existingVary || "Accept-Encoding"
+    );
+    res.setHeader("Content-Length", compressed.length);
+    res.end(compressed);
+    return;
+  }
+
+  res.end(rawBytes);
 }
 
 export async function startNodeServer(
@@ -178,7 +198,11 @@ export async function startNodeServer(
 
   const server = http.createServer(async (req, res) => {
     const method = (req.method || "GET").toUpperCase();
-    try {
+    server.keepAliveTimeout = 65_000;
+  server.headersTimeout = 66_000;
+  server.requestTimeout = 30_000;
+
+  try {
       const proto = firstHeaderValue(req.headers["x-forwarded-proto"]) || "http";
       const headerHost =
         firstHeaderValue(req.headers["x-forwarded-host"]) ||
@@ -211,7 +235,8 @@ export async function startNodeServer(
         SERVER_NAME: serverName
       });
 
-      await writeWebResponse(res, webRes, method);
+      const acceptEncoding = firstHeaderValue(req.headers["accept-encoding"]);
+      await writeWebResponse(res, webRes, method, acceptEncoding);
     } catch (error) {
       if (error instanceof PayloadTooLargeError) {
         if (!res.headersSent) {
@@ -238,6 +263,10 @@ export async function startNodeServer(
       }
     }
   });
+
+  server.keepAliveTimeout = 65_000;
+  server.headersTimeout = 66_000;
+  server.requestTimeout = 30_000;
 
   try {
     await new Promise<void>((resolve, reject) => {

@@ -2,11 +2,56 @@ import { handleMcpRequest } from "./mcp.js";
 import { ExchangeStore } from "./store.js";
 import { Receipt, SCHEMA_VERSION, ServerEnv, SnapshotUploadBody } from "./types.js";
 
+export class HttpError extends Error {
+  constructor(
+    readonly status: number,
+    message: string
+  ) {
+    super(message);
+    this.name = "HttpError";
+  }
+}
+
 const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, Mcp-Session-Id"
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, Mcp-Session-Id, Mcp-Protocol-Version, Accept, Last-Event-ID",
+  "Access-Control-Expose-Headers": "Mcp-Session-Id, Mcp-Protocol-Version"
 };
+
+const TEXT_ENCODER = new TextEncoder();
+const TOKEN_DIGEST_CACHE = new Map<string, Uint8Array>();
+
+async function digestSha256(value: string): Promise<Uint8Array> {
+  const buf = await crypto.subtle.digest("SHA-256", TEXT_ENCODER.encode(value));
+  return new Uint8Array(buf);
+}
+
+async function getExpectedTokenDigest(expectedToken: string): Promise<Uint8Array> {
+  const cached = TOKEN_DIGEST_CACHE.get(expectedToken);
+  if (cached) return cached;
+  const digest = await digestSha256(expectedToken);
+  if (TOKEN_DIGEST_CACHE.size >= 16) {
+    TOKEN_DIGEST_CACHE.clear();
+  }
+  TOKEN_DIGEST_CACHE.set(expectedToken, digest);
+  return digest;
+}
+
+function isInternalError(error: unknown): boolean {
+  if (!(error instanceof Error)) return true;
+  if (error instanceof TypeError || error instanceof ReferenceError || error instanceof RangeError) {
+    return true;
+  }
+  const code = (error as { code?: unknown }).code;
+  if (typeof code === "string" && (code.startsWith("ERR_SQLITE") || code.startsWith("SQLITE"))) {
+    return true;
+  }
+  if (/SQLITE_|D1_ERROR|database is locked|no such table/i.test(error.message)) {
+    return true;
+  }
+  return false;
+}
 
 function withCors(response: Response): Response {
   const headers = new Headers(response.headers);
@@ -30,20 +75,18 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 async function verifyBearerToken(headerValue: string | null, expectedToken: string | undefined): Promise<boolean> {
-  if (!expectedToken || !expectedToken.trim()) {
+  const expected = expectedToken?.trim();
+  if (!expected) {
     return false;
   }
   if (!headerValue || !headerValue.startsWith("Bearer ")) {
     return false;
   }
   const actualRaw = headerValue.slice("Bearer ".length);
-  const encoder = new TextEncoder();
-  const [actualDigest, expectedDigest] = await Promise.all([
-    crypto.subtle.digest("SHA-256", encoder.encode(actualRaw)),
-    crypto.subtle.digest("SHA-256", encoder.encode(expectedToken.trim()))
+  const [a, b] = await Promise.all([
+    digestSha256(actualRaw),
+    getExpectedTokenDigest(expected)
   ]);
-  const a = new Uint8Array(actualDigest);
-  const b = new Uint8Array(expectedDigest);
   let diff = a.length ^ b.length;
   for (let idx = 0; idx < a.length; idx += 1) {
     diff |= a[idx] ^ b[idx];
@@ -174,9 +217,17 @@ export async function handleRequest(request: Request, env: ServerEnv): Promise<R
 
     return jsonResponse({ error: "Not found" }, 404);
   } catch (error) {
+    const status =
+      error instanceof HttpError
+        ? error.status
+        : error instanceof SyntaxError
+          ? 400
+          : isInternalError(error)
+            ? 500
+            : 400;
     return jsonResponse(
       { error: error instanceof Error ? error.message : String(error) },
-      400
+      status
     );
   }
 }

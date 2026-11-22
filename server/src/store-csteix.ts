@@ -1,6 +1,8 @@
 import {
   AppStateRow,
+  extractChangedRows,
   generateRequestId,
+  localDateKey,
   mapReceiptRow,
   matchesDateRange,
   matchesQuery,
@@ -184,27 +186,7 @@ export function normalizeWrittenAt(raw: unknown, timezone: string): string {
 }
 
 export function localDateKeyInTimezone(isoTimestamp: string, timezone: string): string {
-  const parsed = Date.parse(isoTimestamp);
-  if (Number.isNaN(parsed)) return isoTimestamp.slice(0, 10);
-  try {
-    const formatter = new Intl.DateTimeFormat("en-US", {
-      timeZone: timezone || "Asia/Shanghai",
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit"
-    });
-    const parts = formatter.formatToParts(new Date(parsed));
-    const map: Record<string, string> = {};
-    for (const part of parts) {
-      if (part.type !== "literal") map[part.type] = part.value;
-    }
-    if (map.year && map.month && map.day) {
-      return `${map.year}-${map.month}-${map.day}`;
-    }
-  } catch {
-    // Fall back to UTC date prefix if timezone is unexpectedly invalid.
-  }
-  return isoTimestamp.slice(0, 10);
+  return localDateKey(isoTimestamp, timezone || "Asia/Shanghai");
 }
 
 function cleanMarkdownLine(text: string): string {
@@ -255,6 +237,36 @@ export function stripPlaceFields<T>(value: T): T {
     return out as T;
   }
   return value;
+}
+
+type CsteixWuxuMetaRow = Pick<
+  CsteixWuxuRow,
+  | "id"
+  | "slug"
+  | "title"
+  | "title_en"
+  | "dimensions_json"
+  | "written_at"
+  | "timezone"
+  | "revision"
+  | "deleted_at"
+  | "created_at"
+  | "updated_at"
+> & {
+  has_english?: number;
+  has_raw_notes?: number;
+};
+
+function parseDimensionsJson(dimensionsJson: string): CsteixDimension[] {
+  const parsedDims = safeJsonParse<string[]>(dimensionsJson) ?? [];
+  const dimensions = parsedDims
+    .map((dim) => normalizeSingleDimension(dim))
+    .filter((dim): dim is CsteixDimension => dim !== null);
+  return dimensions.length > 0 ? dimensions : ["existence"];
+}
+
+function escapeSqlLike(term: string): string {
+  return term.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
 }
 
 function mapWuxuRow(row: CsteixWuxuRow): CsteixWuxuArticle {
@@ -524,17 +536,39 @@ export class CsteixOperations {
       readOnlyDomains: ["dwell", "meditation", "marks", "places"]
     };
 
-    if (allowedSet.has("wuxu")) {
-      const { results } = await this.db
-        .prepare("SELECT * FROM csteix_wuxu WHERE deleted_at IS NULL ORDER BY written_at DESC, slug ASC")
-        .all<CsteixWuxuRow>();
-      const allActive = results.map(mapWuxuRow);
-      const filtered = allActive.filter((article) =>
+    const [wuxuMetaRes, dwellDataset, meditationDataset, marksDataset] = await Promise.all([
+      allowedSet.has("wuxu")
+        ? this.db
+            .prepare(
+              `SELECT id, slug, title, title_en, dimensions_json, written_at, timezone,
+                      revision, deleted_at, created_at, updated_at,
+                      CASE WHEN body_en IS NOT NULL AND TRIM(body_en) != '' THEN 1 ELSE 0 END AS has_english,
+                      CASE WHEN raw_notes IS NOT NULL AND TRIM(raw_notes) != '' THEN 1 ELSE 0 END AS has_raw_notes
+               FROM csteix_wuxu
+               WHERE deleted_at IS NULL
+               ORDER BY written_at DESC, slug ASC`
+            )
+            .all<CsteixWuxuMetaRow>()
+        : Promise.resolve(null),
+      allowedSet.has("dwell")
+        ? this.ctx.readDataset<CsteixDwellRecord>("csteix", "dwell")
+        : Promise.resolve(null),
+      allowedSet.has("meditation")
+        ? this.ctx.readDataset<CsteixMeditationRecord>("csteix", "meditation")
+        : Promise.resolve(null),
+      allowedSet.has("marks")
+        ? this.ctx.readDataset<CsteixMarkRecord>("csteix", "marks")
+        : Promise.resolve(null)
+    ]);
+
+    if (allowedSet.has("wuxu") && wuxuMetaRes) {
+      const allActive = wuxuMetaRes.results;
+      const filtered = allActive.filter((meta) =>
         matchesDateRange(
-          article.writtenAt,
+          meta.written_at,
           options.from,
           options.to,
-          localDateKeyInTimezone(article.writtenAt, article.timezone)
+          localDateKeyInTimezone(meta.written_at, meta.timezone)
         )
       );
       const byDimension: Record<CsteixDimension, number> = {
@@ -545,13 +579,20 @@ export class CsteixOperations {
       };
       let withEnglishCount = 0;
       let withRawNotesCount = 0;
-      for (const article of filtered) {
-        for (const dim of article.dimensions) {
+      for (const meta of filtered) {
+        for (const dim of parseDimensionsJson(meta.dimensions_json)) {
           byDimension[dim] += 1;
         }
-        if (article.bodyEn && article.bodyEn.trim().length > 0) withEnglishCount += 1;
-        if (article.rawNotes && article.rawNotes.trim().length > 0) withRawNotesCount += 1;
+        if (Number(meta.has_english) === 1) withEnglishCount += 1;
+        if (Number(meta.has_raw_notes) === 1) withRawNotesCount += 1;
       }
+      const latestRow =
+        filtered.length > 0
+          ? await this.db
+              .prepare("SELECT * FROM csteix_wuxu WHERE id = ?")
+              .bind(filtered[0].id)
+              .first<CsteixWuxuRow>()
+          : null;
       result.wuxu = {
         enabled: true,
         totalCount: filtered.length,
@@ -559,15 +600,14 @@ export class CsteixOperations {
         byDimension,
         withEnglishCount,
         withRawNotesCount,
-        latestArticle: filtered.length > 0 ? toSummaryItem(filtered[0], false) : null
+        latestArticle: latestRow ? toSummaryItem(mapWuxuRow(latestRow), false) : null
       };
     } else {
       result.wuxu = { enabled: false };
     }
 
     if (allowedSet.has("dwell")) {
-      const dataset = await this.ctx.readDataset<CsteixDwellRecord>("csteix", "dwell");
-      const filtered = (dataset ?? []).filter((rec) => {
+      const filtered = (dwellDataset ?? []).filter((rec) => {
         const { iso, localDate } = recordDateInfo(rec);
         return matchesDateRange(iso, options.from, options.to, localDate);
       });
@@ -575,7 +615,7 @@ export class CsteixOperations {
       result.dwell = {
         enabled: true,
         readOnly: true,
-        datasetUploaded: dataset !== null,
+        datasetUploaded: dwellDataset !== null,
         recordCount: filtered.length,
         totalSeconds: stats.totalSeconds,
         byPillar: stats.byPillar
@@ -585,8 +625,7 @@ export class CsteixOperations {
     }
 
     if (allowedSet.has("meditation")) {
-      const dataset = await this.ctx.readDataset<CsteixMeditationRecord>("csteix", "meditation");
-      const filtered = (dataset ?? []).filter((rec) => {
+      const filtered = (meditationDataset ?? []).filter((rec) => {
         const { iso, localDate } = recordDateInfo(rec);
         return matchesDateRange(iso, options.from, options.to, localDate);
       });
@@ -594,7 +633,7 @@ export class CsteixOperations {
       result.meditation = {
         enabled: true,
         readOnly: true,
-        datasetUploaded: dataset !== null,
+        datasetUploaded: meditationDataset !== null,
         recordCount: filtered.length,
         totalSeconds: stats.totalSeconds,
         byPillar: stats.byPillar
@@ -604,8 +643,7 @@ export class CsteixOperations {
     }
 
     if (allowedSet.has("marks")) {
-      const dataset = await this.ctx.readDataset<CsteixMarkRecord>("csteix", "marks");
-      const filtered = (dataset ?? []).filter((rec) => {
+      const filtered = (marksDataset ?? []).filter((rec) => {
         const { iso, localDate } = recordDateInfo(rec);
         return matchesDateRange(iso, options.from, options.to, localDate);
       });
@@ -628,7 +666,7 @@ export class CsteixOperations {
       result.marks = {
         enabled: true,
         readOnly: true,
-        datasetUploaded: dataset !== null,
+        datasetUploaded: marksDataset !== null,
         recordCount: filtered.length,
         totalCount,
         byKind,
@@ -653,8 +691,10 @@ export class CsteixOperations {
     limit?: number;
     offset?: number;
   } = {}): Promise<Record<string, unknown>> {
-    await this.ctx.assertDomainReadAllowed("csteix", "dwell");
     const { allowedSet } = await this.getAllowedDomainsSet();
+    if (!allowedSet.has("dwell")) {
+      throw new Error("Domain 'dwell' is disabled by user policy in CSTEIX. Enable it in CSTEIX Settings -> AI Assistant.");
+    }
     const allowPlaces = allowedSet.has("places");
 
     const dataset = await this.ctx.readDataset<CsteixDwellRecord>("csteix", "dwell");
@@ -668,13 +708,15 @@ export class CsteixOperations {
     }
     items.sort((a, b) => recordSortKey(b).localeCompare(recordSortKey(a)));
 
-    const sanitized = allowPlaces ? items : items.map((item) => stripPlaceFields(item));
     const { limit, offset } = normalizePagination(options);
+    const page = paginate(items, limit, offset);
+    const sanitizedItems = allowPlaces ? page.items : page.items.map((item) => stripPlaceFields(item));
     return {
       readOnly: true,
       placesIncluded: allowPlaces,
       datasetUploaded: dataset !== null,
-      ...paginate(sanitized, limit, offset)
+      ...page,
+      items: sanitizedItems
     };
   }
 
@@ -685,8 +727,10 @@ export class CsteixOperations {
     limit?: number;
     offset?: number;
   } = {}): Promise<Record<string, unknown>> {
-    await this.ctx.assertDomainReadAllowed("csteix", "meditation");
     const { allowedSet } = await this.getAllowedDomainsSet();
+    if (!allowedSet.has("meditation")) {
+      throw new Error("Domain 'meditation' is disabled by user policy in CSTEIX. Enable it in CSTEIX Settings -> AI Assistant.");
+    }
     const allowPlaces = allowedSet.has("places");
 
     const dataset = await this.ctx.readDataset<CsteixMeditationRecord>("csteix", "meditation");
@@ -700,13 +744,15 @@ export class CsteixOperations {
     }
     items.sort((a, b) => recordSortKey(b).localeCompare(recordSortKey(a)));
 
-    const sanitized = allowPlaces ? items : items.map((item) => stripPlaceFields(item));
     const { limit, offset } = normalizePagination(options);
+    const page = paginate(items, limit, offset);
+    const sanitizedItems = allowPlaces ? page.items : page.items.map((item) => stripPlaceFields(item));
     return {
       readOnly: true,
       placesIncluded: allowPlaces,
       datasetUploaded: dataset !== null,
-      ...paginate(sanitized, limit, offset)
+      ...page,
+      items: sanitizedItems
     };
   }
 
@@ -718,8 +764,10 @@ export class CsteixOperations {
     limit?: number;
     offset?: number;
   } = {}): Promise<Record<string, unknown>> {
-    await this.ctx.assertDomainReadAllowed("csteix", "marks");
     const { allowedSet } = await this.getAllowedDomainsSet();
+    if (!allowedSet.has("marks")) {
+      throw new Error("Domain 'marks' is disabled by user policy in CSTEIX. Enable it in CSTEIX Settings -> AI Assistant.");
+    }
     const allowPlaces = allowedSet.has("places");
 
     const dataset = await this.ctx.readDataset<CsteixMarkRecord>("csteix", "marks");
@@ -737,13 +785,15 @@ export class CsteixOperations {
     }
     items.sort((a, b) => recordSortKey(b).localeCompare(recordSortKey(a)));
 
-    const sanitized = allowPlaces ? items : items.map((item) => stripPlaceFields(item));
     const { limit, offset } = normalizePagination(options);
+    const page = paginate(items, limit, offset);
+    const sanitizedItems = allowPlaces ? page.items : page.items.map((item) => stripPlaceFields(item));
     return {
       readOnly: true,
       placesIncluded: allowPlaces,
       datasetUploaded: dataset !== null,
-      ...paginate(sanitized, limit, offset)
+      ...page,
+      items: sanitizedItems
     };
   }
 
@@ -763,64 +813,95 @@ export class CsteixOperations {
   } = {}): Promise<Record<string, unknown>> {
     await this.ctx.assertDomainReadAllowed("csteix", "wuxu");
 
-    const sql = options.includeDeleted
-      ? "SELECT * FROM csteix_wuxu ORDER BY written_at DESC, slug ASC"
-      : "SELECT * FROM csteix_wuxu WHERE deleted_at IS NULL ORDER BY written_at DESC, slug ASC";
-    const { results } = await this.db.prepare(sql).all<CsteixWuxuRow>();
-    let articles = results.map(mapWuxuRow);
+    const clauses: string[] = [];
+    const bindings: unknown[] = [];
 
-    if (options.from || options.to) {
-      articles = articles.filter((article) =>
-        matchesDateRange(
-          article.writtenAt,
-          options.from,
-          options.to,
-          localDateKeyInTimezone(article.writtenAt, article.timezone)
-        )
+    if (!options.includeDeleted) {
+      clauses.push("deleted_at IS NULL");
+    }
+    if (options.hasRaw === true) {
+      clauses.push("raw_notes IS NOT NULL AND TRIM(raw_notes) != ''");
+    } else if (options.hasRaw === false) {
+      clauses.push("(raw_notes IS NULL OR TRIM(raw_notes) = '')");
+    }
+    if (options.hasEn === true) {
+      clauses.push("body_en IS NOT NULL AND TRIM(body_en) != ''");
+    } else if (options.hasEn === false) {
+      clauses.push("(body_en IS NULL OR TRIM(body_en) = '')");
+    }
+
+    const trimmedQuery = options.query?.trim();
+    if (trimmedQuery) {
+      const likePattern = `%${escapeSqlLike(trimmedQuery)}%`;
+      clauses.push(
+        `(slug LIKE ? ESCAPE '\\' OR title LIKE ? ESCAPE '\\' OR COALESCE(title_en, '') LIKE ? ESCAPE '\\' OR body_zh LIKE ? ESCAPE '\\' OR COALESCE(body_en, '') LIKE ? ESCAPE '\\' OR COALESCE(raw_notes, '') LIKE ? ESCAPE '\\')`
       );
+      bindings.push(likePattern, likePattern, likePattern, likePattern, likePattern, likePattern);
     }
 
-    if (options.dimension?.trim()) {
-      const dim = normalizeSingleDimension(options.dimension);
-      if (!dim) {
-        throw new Error(
-          `Invalid dimension filter '${options.dimension}'. Allowed: chaos, spacetime, existence, ix.`
-        );
-      }
-      articles = articles.filter((article) => article.dimensions.includes(dim));
-    }
-
-    if (options.hasRaw !== undefined) {
-      articles = articles.filter((article) => {
-        const has = Boolean(article.rawNotes && article.rawNotes.trim().length > 0);
-        return has === options.hasRaw;
-      });
-    }
-
-    if (options.hasEn !== undefined) {
-      articles = articles.filter((article) => {
-        const has = Boolean(article.bodyEn && article.bodyEn.trim().length > 0);
-        return has === options.hasEn;
-      });
-    }
-
-    if (options.query?.trim()) {
-      articles = articles.filter((article) =>
-        matchesQuery(options.query, [
-          article.slug,
-          article.title,
-          article.titleEn,
-          article.bodyZh,
-          article.bodyEn,
-          article.rawNotes
-        ])
+    const whereSql = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
+    const targetDim = options.dimension?.trim() ? normalizeSingleDimension(options.dimension) : undefined;
+    if (options.dimension?.trim() && !targetDim) {
+      throw new Error(
+        `Invalid dimension filter '${options.dimension}'. Allowed: chaos, spacetime, existence, ix.`
       );
     }
 
     const includeBody = options.includeBody === true;
-    const mapped = articles.map((article) => toSummaryItem(article, includeBody));
+
+    // Select lightweight columns first when full bodies aren't immediately requested in SQL, then
+    // hydrate only the paginated slice so headings/leavingLines never scan off-page articles.
+    const metaSql = `SELECT id, slug, title, title_en, dimensions_json, written_at, timezone,
+                            revision, deleted_at, created_at, updated_at,
+                            CASE WHEN body_en IS NOT NULL AND TRIM(body_en) != '' THEN 1 ELSE 0 END AS has_english,
+                            CASE WHEN raw_notes IS NOT NULL AND TRIM(raw_notes) != '' THEN 1 ELSE 0 END AS has_raw_notes
+                     FROM csteix_wuxu ${whereSql} ORDER BY written_at DESC, slug ASC`;
+    const metaStmt = this.db.prepare(metaSql);
+    const metaRows = (
+      bindings.length > 0 ? await metaStmt.bind(...bindings).all<CsteixWuxuMetaRow>() : await metaStmt.all<CsteixWuxuMetaRow>()
+    ).results;
+
+    let filteredMeta = metaRows;
+    if (options.from || options.to) {
+      filteredMeta = filteredMeta.filter((row) =>
+        matchesDateRange(
+          row.written_at,
+          options.from,
+          options.to,
+          localDateKeyInTimezone(row.written_at, row.timezone)
+        )
+      );
+    }
+    if (targetDim) {
+      filteredMeta = filteredMeta.filter((row) => parseDimensionsJson(row.dimensions_json).includes(targetDim));
+    }
+
     const { limit, offset } = normalizePagination(options);
-    return paginate(mapped, limit, offset);
+    const metaPage = paginate(filteredMeta, limit, offset);
+    if (metaPage.items.length === 0) {
+      return {
+        ...metaPage,
+        items: []
+      };
+    }
+
+    const ids = metaPage.items.map((item) => item.id);
+    const placeholders = ids.map(() => "?").join(", ");
+    const fullRowsRes = await this.db
+      .prepare(`SELECT * FROM csteix_wuxu WHERE id IN (${placeholders})`)
+      .bind(...ids)
+      .all<CsteixWuxuRow>();
+    const fullById = new Map(fullRowsRes.results.map((r) => [r.id, r]));
+
+    const hydratedItems = ids
+      .map((id) => fullById.get(id))
+      .filter((r): r is CsteixWuxuRow => r !== undefined)
+      .map((r) => toSummaryItem(mapWuxuRow(r), includeBody));
+
+    return {
+      ...metaPage,
+      items: hydratedItems
+    };
   }
 
   async getWuxu(options: { id?: string; slug?: string }): Promise<Record<string, unknown>> {
@@ -1125,30 +1206,37 @@ export class CsteixOperations {
       }
     };
 
-    await this.db.batch([
-      this.db
-        .prepare(
-          `UPDATE csteix_wuxu
-           SET title = ?, title_en = ?, dimensions_json = ?, written_at = ?, timezone = ?,
-               body_zh = ?, body_en = ?, raw_notes = ?, revision = ?, updated_at = ?
-           WHERE id = ? AND revision = ?`
-        )
-        .bind(
-          nextTitle,
-          nextTitleEn,
-          JSON.stringify(nextDimensions),
-          nextWrittenAt,
-          nextTimezone,
-          nextBodyZh,
-          nextBodyEn,
-          nextRawNotes,
-          nextRevision,
-          now,
-          existing.id,
-          existing.revision
-        ),
-      this.makeAppliedReceiptStatement(receipt)
-    ]);
+    const updateResult = await this.db
+      .prepare(
+        `UPDATE csteix_wuxu
+         SET title = ?, title_en = ?, dimensions_json = ?, written_at = ?, timezone = ?,
+             body_zh = ?, body_en = ?, raw_notes = ?, revision = ?, updated_at = ?
+         WHERE id = ? AND revision = ? AND deleted_at IS NULL`
+      )
+      .bind(
+        nextTitle,
+        nextTitleEn,
+        JSON.stringify(nextDimensions),
+        nextWrittenAt,
+        nextTimezone,
+        nextBodyZh,
+        nextBodyEn,
+        nextRawNotes,
+        nextRevision,
+        now,
+        existing.id,
+        existing.revision
+      )
+      .run();
+
+    const changed = extractChangedRows(updateResult);
+    if (changed === 0) {
+      throw new Error(
+        `Revision conflict for '${existing.slug}': expected revision ${existing.revision}, but the article changed concurrently. Fetch the latest article with csteix_get_wuxu and retry.`
+      );
+    }
+
+    await this.makeAppliedReceiptStatement(receipt).run();
 
     const article: CsteixWuxuArticle = {
       id: existing.id,
@@ -1235,16 +1323,21 @@ export class CsteixOperations {
       }
     };
 
-    await this.db.batch([
-      this.db
-        .prepare(
-          `UPDATE csteix_wuxu
-           SET deleted_at = ?, revision = ?, updated_at = ?
-           WHERE id = ? AND deleted_at IS NULL`
-        )
-        .bind(now, nextRevision, now, existing.id),
-      this.makeAppliedReceiptStatement(receipt)
-    ]);
+    const deleteResult = await this.db
+      .prepare(
+        `UPDATE csteix_wuxu
+         SET deleted_at = ?, revision = ?, updated_at = ?
+         WHERE id = ? AND deleted_at IS NULL`
+      )
+      .bind(now, nextRevision, now, existing.id)
+      .run();
+
+    const changed = extractChangedRows(deleteResult);
+    if (changed === 0) {
+      throw new Error(`Wuxu article '${existing.slug}' was already moved to Trash concurrently.`);
+    }
+
+    await this.makeAppliedReceiptStatement(receipt).run();
 
     const updated = mapWuxuRow({
       ...existing,
@@ -1325,16 +1418,21 @@ export class CsteixOperations {
       }
     };
 
-    await this.db.batch([
-      this.db
-        .prepare(
-          `UPDATE csteix_wuxu
-           SET deleted_at = NULL, revision = ?, updated_at = ?
-           WHERE id = ? AND deleted_at IS NOT NULL`
-        )
-        .bind(nextRevision, now, existing.id),
-      this.makeAppliedReceiptStatement(receipt)
-    ]);
+    const restoreResult = await this.db
+      .prepare(
+        `UPDATE csteix_wuxu
+         SET deleted_at = NULL, revision = ?, updated_at = ?
+         WHERE id = ? AND deleted_at IS NOT NULL`
+      )
+      .bind(nextRevision, now, existing.id)
+      .run();
+
+    const changed = extractChangedRows(restoreResult);
+    if (changed === 0) {
+      throw new Error(`Wuxu article '${existing.slug}' was already restored or removed concurrently.`);
+    }
+
+    await this.makeAppliedReceiptStatement(receipt).run();
 
     const updated = mapWuxuRow({
       ...existing,
@@ -1443,6 +1541,20 @@ export class CsteixOperations {
       });
     }
 
+    const existingBySlug = new Map<string, CsteixWuxuRow>();
+    const allSlugs = normalizedItems.map((item) => item.slug);
+    for (let i = 0; i < allSlugs.length; i += 80) {
+      const chunk = allSlugs.slice(i, i + 80);
+      const placeholders = chunk.map(() => "?").join(", ");
+      const { results } = await this.db
+        .prepare(`SELECT * FROM csteix_wuxu WHERE slug IN (${placeholders})`)
+        .bind(...chunk)
+        .all<CsteixWuxuRow>();
+      for (const row of results) {
+        existingBySlug.set(row.slug, row);
+      }
+    }
+
     const now = new Date().toISOString();
     let inserted = 0;
     let updated = 0;
@@ -1450,10 +1562,7 @@ export class CsteixOperations {
     const statements: SqlPreparedStatement[] = [];
 
     for (const item of normalizedItems) {
-      const existing = await this.db
-        .prepare("SELECT * FROM csteix_wuxu WHERE slug = ?")
-        .bind(item.slug)
-        .first<CsteixWuxuRow>();
+      const existing = existingBySlug.get(item.slug) ?? null;
 
       if (!existing) {
         const id = crypto.randomUUID();

@@ -26,12 +26,27 @@ const RAW_SET_SCHEMA = {
   }
 };
 
-export const TOOL_DEFINITIONS = [
+export interface McpToolAnnotations {
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+  idempotentHint?: boolean;
+  openWorldHint?: boolean;
+}
+
+export interface McpToolDefinition {
+  name: string;
+  title: string;
+  description: string;
+  annotations?: McpToolAnnotations;
+  inputSchema: Record<string, unknown>;
+}
+
+const RAW_TOOL_DEFINITIONS: McpToolDefinition[] = [
   {
     name: "chaox_get_status",
     title: "CHAOX Exchange Status",
     description:
-      "Inspect connected CHAOX apps (sx/bx/csteix), user permission policies, uploaded dataset counts, pending server inbox counts, and recent or specific request receipts.",
+      "Inspect connected CHAOX apps (sx/bx/csteix), user permission policies, uploaded dataset counts, pending server inbox counts, custom preferences flag, and recent or specific request receipts.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: "object",
@@ -39,6 +54,72 @@ export const TOOL_DEFINITIONS = [
         app: { type: "string", enum: ["sx", "bx", "csteix"], description: "Filter receipts by app" },
         requestId: { type: "string", description: "Look up a specific queued or processed requestId" },
         receiptLimit: { type: "integer", minimum: 1, maximum: 50, description: "Max recent receipts (default 10)" }
+      }
+    }
+  },
+  {
+    name: "chaox_get_briefing",
+    title: "CHAOX Cross-App Daily Briefing",
+    description:
+      "One-shot read across connected SX, BX, and CSTEIX apps respecting all permission policies and domain allowlists. Returns custom user preferences, today & month SX financial optimistic totals + compact project/tag catalog, BX daily nutrition/skin/toilet totals + latest sleep + workouts on date, and CSTEIX summary + latest Wuxu article.",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        date: { type: "string", description: "Optional local calendar date YYYY-MM-DD (defaults to today in each app's timezone)" },
+        apps: {
+          type: "array",
+          items: { type: "string", enum: ["sx", "bx", "csteix"] },
+          description: "Optional subset of apps to include (defaults to all connected permitted apps)"
+        }
+      }
+    }
+  },
+  {
+    name: "chaox_list_pending",
+    title: "List Pending Server Inbox",
+    description:
+      "List all queued un-synced write/update/delete requests waiting in the server inbox across SX, BX, and CSTEIX, including requestId, op, payload, and resolvedLocalTime.",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        app: { type: "string", enum: ["sx", "bx", "csteix"], description: "Optional app filter" }
+      }
+    }
+  },
+  {
+    name: "chaox_cancel_pending",
+    title: "Cancel Pending Inbox Request",
+    description:
+      "Remove/cancel a queued un-synced request from the server inbox by requestId before iOS syncs it (checks app permission policy). Never alters already-synced records; if already synced, returns its receipt status and recordId.",
+    annotations: { destructiveHint: true },
+    inputSchema: {
+      type: "object",
+      required: ["requestId"],
+      properties: {
+        requestId: { type: "string", minLength: 1, description: "Queued requestId from tool output or chaox_list_pending" }
+      }
+    }
+  },
+  {
+    name: "chaox_get_preferences",
+    title: "Get Personal Assistant Preferences",
+    description:
+      "Read the user's saved personal Markdown routing rules and habits (exposed via chaox://guide/preferences).",
+    annotations: { readOnlyHint: true },
+    inputSchema: { type: "object", properties: {} }
+  },
+  {
+    name: "chaox_update_preferences",
+    title: "Update Personal Assistant Preferences",
+    description:
+      "Save or append user-requested personal assistant preferences (e.g. default meal project, currency, workout conventions) in the BYOS database.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        content: { type: "string", description: "Full Markdown replacement (pass either 'content' or 'append', not both)" },
+        append: { type: "string", description: "Single rule line or Markdown section to append cleanly" }
       }
     }
   },
@@ -104,7 +185,7 @@ export const TOOL_DEFINITIONS = [
     name: "sx_list_expenses",
     title: "List SX Expenses",
     description:
-      "Read Spending X expense records (sorted newest first, with pending inbox overlay and refunds, excluding vault secrets). Returned fields per item: id (integer; -1 if queued in inbox), projectId, projectName, amount (gross paid), refundTotal, netAmount (amount - refundTotal, shown as headline), currency, tags, notes (memo; note write tools use singular 'note'), paidAt (UTC ISO-8601), localDate ('YYYY-MM-DD' in timeZoneIdentifier), localHour (integer 0..23 in timeZoneIdentifier), displayDate ('YYYY-MM-DD-HH' matching SX UI — trailing 2 digits are the 24-hour local hour, NEVER minutes or a counter), isAutoRecorded (true for scheduled subscription auto-records), credentialId/credentialName (when 'credentials' scope is enabled), refunds.",
+      "Read Spending X expense records (sorted newest first, with full pending inbox overlay including pending refunds, excluding vault secrets). Also returns pre-pagination 'aggregates' over all matching records (recordCount, totalsByCurrency gross/refund/net/count, top 10 byProject & byTag). For queued un-synced creates (id: -1), pass 'pendingRequestId' to sx_update_expense/sx_delete_expense.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: "object",
@@ -132,7 +213,7 @@ export const TOOL_DEFINITIONS = [
     name: "sx_list_incomes",
     title: "List SX Incomes",
     description:
-      "Read Spending X income records (sorted newest first, with pending inbox overlay and reversals, excluding vault secrets). Returned fields per item: id (-1 if queued), projectId, projectName, amount (gross), reversalTotal, netAmount (amount - reversalTotal), currency, tags, notes (plural on read; write tools use 'note'), receivedAt (UTC ISO-8601), localDate ('YYYY-MM-DD' in timeZoneIdentifier — SX incomes display day precision without -HH), reversals.",
+      "Read Spending X income records (sorted newest first, with full pending inbox overlay including pending reversals, excluding vault secrets). Also returns pre-pagination 'aggregates' (recordCount, totalsByCurrency gross/reversal/net/count, top 10 byProject & byTag).",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: "object",
@@ -257,17 +338,20 @@ export const TOOL_DEFINITIONS = [
     name: "sx_update_expense",
     title: "Update SX Expense",
     description:
-      "Queue a partial patch update to an existing SX expense record by ID (requires Update permission). Omitted fields (such as amount, currency, tags, note) remain unchanged. Multiple queued updates for the same existing id execute strictly in FIFO order on device (and overlay in order in sx_list_expenses), so you can send a follow-up update to fix date or hour immediately without waiting for the user to sync SX first. Examples: { id: 698, date: '2026-11-22', hour: 9 } or { id: 698, date: '2026-11-22-09' } or { id: 698, hour: 9 }.",
+      "Update an existing SX expense by 'id' OR patch a queued un-synced expense create (id: -1) in-place by 'pendingRequestId' (transparently targets the synced id if it synced concurrently). Omitted fields stay unchanged; sequential updates execute in strict FIFO order on device.",
     inputSchema: {
       type: "object",
-      required: ["id"],
       properties: {
-        id: { type: "integer", minimum: 1, description: "Target expense record ID from sx_list_expenses" },
+        id: { type: "integer", minimum: 1, description: "Committed expense record ID from sx_list_expenses (provide id or pendingRequestId)" },
+        pendingRequestId: {
+          type: "string",
+          description: "For un-synced queued creates (id: -1), pass pendingRequestId from sx_list_expenses/chaox_list_pending to edit in-place"
+        },
         amount: { type: "number", exclusiveMinimum: 0, description: "New gross payment amount strictly > 0" },
         projectName: {
           type: "string",
           description:
-            "Move expense to another existing project supporting expenses (note: moving projects clears existing credentialId unless a new credentialId is also provided)"
+            "Move expense to another existing project supporting expenses (validated against catalog; moving projects clears existing credentialId unless a new credentialId is also provided)"
         },
         credentialId: {
           type: "integer",
@@ -295,7 +379,7 @@ export const TOOL_DEFINITIONS = [
           minimum: 0,
           maximum: 23,
           description:
-            "New 24-hour local hour (0..23) in SX's timezone. If 'date' is omitted, keeps the expense's existing (or latest queued) localDate from the synced snapshot and changes only its hour."
+            "New 24-hour local hour (0..23) in SX's timezone. If 'date' is omitted, keeps the expense's existing (or queued) localDate and changes only its hour."
         },
         requestId: { type: "string", description: "Optional idempotency key for safe retries" },
         client: { type: "string", description: "Optional calling AI assistant identifier" }
@@ -305,13 +389,14 @@ export const TOOL_DEFINITIONS = [
   {
     name: "sx_delete_expense",
     title: "Delete SX Expense (Trash)",
-    description: "Move an SX expense (and its refunds) to 30-day recoverable Trash (requires Delete permission).",
+    description:
+      "Move a committed SX expense (and its refunds) to 30-day recoverable Trash by 'id', or cancel an un-synced queued create directly by 'pendingRequestId'.",
     annotations: { destructiveHint: true },
     inputSchema: {
       type: "object",
-      required: ["id"],
       properties: {
-        id: { type: "integer", minimum: 1, description: "Expense ID from sx_list_expenses" },
+        id: { type: "integer", minimum: 1, description: "Committed expense ID from sx_list_expenses (provide id or pendingRequestId)" },
+        pendingRequestId: { type: "string", description: "Cancel a queued un-synced create by pendingRequestId (or delete synced target)" },
         requestId: { type: "string", description: "Optional idempotency key" },
         client: { type: "string", description: "Optional calling AI assistant identifier" }
       }
@@ -410,12 +495,12 @@ export const TOOL_DEFINITIONS = [
     name: "sx_update_income",
     title: "Update SX Income",
     description:
-      "Queue a partial patch update to an existing SX income record by ID (omitted fields remain unchanged; sequential queued updates execute in FIFO order on device).",
+      "Update an existing SX income record by 'id' OR patch a queued un-synced income create (id: -1) in-place by 'pendingRequestId'.",
     inputSchema: {
       type: "object",
-      required: ["id"],
       properties: {
-        id: { type: "integer", minimum: 1, description: "Income record ID from sx_list_incomes" },
+        id: { type: "integer", minimum: 1, description: "Income record ID from sx_list_incomes (provide id or pendingRequestId)" },
+        pendingRequestId: { type: "string", description: "Pending requestId for an un-synced queued income create (id: -1)" },
         amount: { type: "number", exclusiveMinimum: 0, description: "New positive gross income amount" },
         projectName: { type: "string", description: "Move income to another existing project supporting income" },
         credentialId: { type: "integer", minimum: 1, description: "Attach/change credential ID (requires 'credentials' scope)" },
@@ -436,13 +521,14 @@ export const TOOL_DEFINITIONS = [
   {
     name: "sx_delete_income",
     title: "Delete SX Income (Trash)",
-    description: "Move an SX income record (and its reversals) to 30-day Trash by ID.",
+    description:
+      "Move an SX income record (and its reversals) to 30-day Trash by 'id', or cancel a queued un-synced create by 'pendingRequestId'.",
     annotations: { destructiveHint: true },
     inputSchema: {
       type: "object",
-      required: ["id"],
       properties: {
-        id: { type: "integer", minimum: 1, description: "Income record ID from sx_list_incomes" },
+        id: { type: "integer", minimum: 1, description: "Income record ID from sx_list_incomes (provide id or pendingRequestId)" },
+        pendingRequestId: { type: "string", description: "Pending requestId to cancel an un-synced queued income create" },
         requestId: { type: "string", description: "Optional idempotency key" },
         client: { type: "string", description: "Optional calling AI assistant identifier" }
       }
@@ -910,7 +996,7 @@ export const TOOL_DEFINITIONS = [
     name: "bx_list_workouts",
     title: "List BX Workouts",
     description:
-      "Read workouts (Apple Health timing/duration/kcal/HR are read-only) along with mutable exercises, equipment, set groups, reps, and weights in kg.",
+      "Read workouts (Apple Health timing/duration/kcal/HR are read-only) along with mutable exercises, equipment, set groups, reps, and weights in kg, including full pending overlay and pre-pagination 'aggregates' (workoutCount, totalDurationMinutes, totalActiveEnergyKcal, totalSets, totalVolumeKg, byActivityType).",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: "object",
@@ -944,7 +1030,8 @@ export const TOOL_DEFINITIONS = [
   {
     name: "bx_list_food",
     title: "List BX Food Entries",
-    description: "Read Body X food/meal entries with optimistic inbox overlay.",
+    description:
+      "Read Body X food/meal entries with optimistic inbox overlay and pre-pagination 'aggregates' (recordCount, totalCalories, unknownCaloriesCount, byMealType, byDate).",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: "object",
@@ -1007,7 +1094,11 @@ export const TOOL_DEFINITIONS = [
         name: { type: "string", minLength: 1, description: "Food or meal description" },
         mealType: { type: "string", enum: ["breakfast", "lunch", "dinner", "snack"], description: "Meal slot (inferred from recordedAt on device if omitted)" },
         calories: { type: "number", minimum: 0, description: "Estimated or exact kilocalories (>= 0, optional)" },
-        recordedAt: { type: "string", description: "ISO-8601 timestamp with timezone offset (e.g. '2026-11-22T12:00:00+08:00'); defaults to now" },
+        recordedAt: {
+          type: "string",
+          description:
+            "Timestamp: ISO-8601 with offset ('2026-11-22T12:00:00+08:00'), local 'YYYY-MM-DD HH:mm' in BX timezone, or 'YYYY-MM-DD' (local noon); defaults to now"
+        },
         requestId: { type: "string", description: "Optional idempotency key" },
         client: { type: "string", description: "Optional calling AI assistant identifier" }
       }
@@ -1016,17 +1107,17 @@ export const TOOL_DEFINITIONS = [
   {
     name: "bx_update_food",
     title: "Update BX Food",
-    description: "Update an existing BX food entry by UUID.",
+    description: "Update a BX food entry by UUID or edit an un-synced queued entry in-place by 'pending:<requestId>'.",
     inputSchema: {
       type: "object",
       required: ["id"],
       properties: {
-        id: { type: "string", minLength: 1 },
+        id: { type: "string", minLength: 1, description: "Food UUID or 'pending:<requestId>'" },
         name: { type: "string" },
         mealType: { type: "string", enum: ["breakfast", "lunch", "dinner", "snack"] },
-        calories: { type: "number", exclusiveMinimum: 0 },
+        calories: { type: "number", minimum: 0 },
         clearCalories: { type: "boolean" },
-        recordedAt: { type: "string", description: "Replacement ISO-8601 timestamp with timezone offset" },
+        recordedAt: { type: "string", description: "ISO-8601 with offset, local 'YYYY-MM-DD HH:mm' in BX timezone, or 'YYYY-MM-DD'" },
         requestId: { type: "string" },
         client: { type: "string" }
       }
@@ -1035,13 +1126,13 @@ export const TOOL_DEFINITIONS = [
   {
     name: "bx_delete_food",
     title: "Delete BX Food",
-    description: "Delete a BX food entry by UUID.",
+    description: "Delete a BX food entry by UUID or cancel an un-synced queued entry via 'pending:<requestId>'.",
     annotations: { destructiveHint: true },
     inputSchema: {
       type: "object",
       required: ["id"],
       properties: {
-        id: { type: "string", minLength: 1 },
+        id: { type: "string", minLength: 1, description: "Food UUID or 'pending:<requestId>'" },
         requestId: { type: "string" },
         client: { type: "string" }
       }
@@ -1058,7 +1149,10 @@ export const TOOL_DEFINITIONS = [
         product: { type: "string", enum: ["sunscreen", "moisturizer", "bodyLotion", "medicine", "other"] },
         name: { type: "string", description: "Optional product or medication name" },
         brand: { type: "string", description: "Alias for name if no separate product label" },
-        recordedAt: { type: "string", description: "ISO-8601 timestamp with timezone offset (defaults to now)" },
+        recordedAt: {
+          type: "string",
+          description: "ISO-8601 with offset, local 'YYYY-MM-DD HH:mm' in BX timezone, or 'YYYY-MM-DD' (defaults to now)"
+        },
         requestId: { type: "string" },
         client: { type: "string" }
       }
@@ -1067,15 +1161,15 @@ export const TOOL_DEFINITIONS = [
   {
     name: "bx_update_skin",
     title: "Update BX Medication / Skincare",
-    description: "Update an existing BX skincare or medication log by UUID.",
+    description: "Update a BX skincare or medication log by UUID or 'pending:<requestId>'.",
     inputSchema: {
       type: "object",
       required: ["id"],
       properties: {
-        id: { type: "string", minLength: 1 },
+        id: { type: "string", minLength: 1, description: "Skin entry UUID or 'pending:<requestId>'" },
         product: { type: "string", enum: ["sunscreen", "moisturizer", "bodyLotion", "medicine", "other"] },
         name: { type: "string" },
-        recordedAt: { type: "string", description: "Replacement ISO-8601 timestamp with timezone offset" },
+        recordedAt: { type: "string", description: "ISO-8601 with offset, local 'YYYY-MM-DD HH:mm' in BX timezone, or 'YYYY-MM-DD'" },
         requestId: { type: "string" },
         client: { type: "string" }
       }
@@ -1084,13 +1178,13 @@ export const TOOL_DEFINITIONS = [
   {
     name: "bx_delete_skin",
     title: "Delete BX Medication / Skincare",
-    description: "Delete a BX skincare or medication log by UUID.",
+    description: "Delete a BX skincare or medication log by UUID or cancel via 'pending:<requestId>'.",
     annotations: { destructiveHint: true },
     inputSchema: {
       type: "object",
       required: ["id"],
       properties: {
-        id: { type: "string", minLength: 1 },
+        id: { type: "string", minLength: 1, description: "Skin entry UUID or 'pending:<requestId>'" },
         requestId: { type: "string" },
         client: { type: "string" }
       }
@@ -1107,7 +1201,10 @@ export const TOOL_DEFINITIONS = [
         stoolType: { type: "integer", minimum: 1, maximum: 7, description: "Bristol stool scale 1..7 (required for bowel)" },
         bristol: { type: "integer", minimum: 1, maximum: 7, description: "Alias for stoolType" },
         note: { type: "string" },
-        recordedAt: { type: "string", description: "ISO-8601 timestamp with timezone offset (defaults to now)" },
+        recordedAt: {
+          type: "string",
+          description: "ISO-8601 with offset, local 'YYYY-MM-DD HH:mm' in BX timezone, or 'YYYY-MM-DD' (defaults to now)"
+        },
         requestId: { type: "string" },
         client: { type: "string" }
       }
@@ -1116,17 +1213,17 @@ export const TOOL_DEFINITIONS = [
   {
     name: "bx_update_toilet",
     title: "Update BX Toilet Event",
-    description: "Update an existing BX toilet event by UUID.",
+    description: "Update a BX toilet event by UUID or 'pending:<requestId>'.",
     inputSchema: {
       type: "object",
       required: ["id"],
       properties: {
-        id: { type: "string", minLength: 1 },
+        id: { type: "string", minLength: 1, description: "Toilet UUID or 'pending:<requestId>'" },
         kind: { type: "string", enum: ["bowel", "urination"] },
         stoolType: { type: "integer", minimum: 1, maximum: 7 },
         bristol: { type: "integer", minimum: 1, maximum: 7 },
         note: { type: "string" },
-        recordedAt: { type: "string", description: "Replacement ISO-8601 timestamp with timezone offset" },
+        recordedAt: { type: "string", description: "ISO-8601 with offset, local 'YYYY-MM-DD HH:mm' in BX timezone, or 'YYYY-MM-DD'" },
         requestId: { type: "string" },
         client: { type: "string" }
       }
@@ -1135,13 +1232,13 @@ export const TOOL_DEFINITIONS = [
   {
     name: "bx_delete_toilet",
     title: "Delete BX Toilet Event",
-    description: "Delete a BX toilet event by UUID.",
+    description: "Delete a BX toilet event by UUID or cancel via 'pending:<requestId>'.",
     annotations: { destructiveHint: true },
     inputSchema: {
       type: "object",
       required: ["id"],
       properties: {
-        id: { type: "string", minLength: 1 },
+        id: { type: "string", minLength: 1, description: "Toilet UUID or 'pending:<requestId>'" },
         requestId: { type: "string" },
         client: { type: "string" }
       }
@@ -1438,3 +1535,21 @@ export const TOOL_DEFINITIONS = [
     }
   }
 ];
+
+function normalizeToolAnnotations(tool: McpToolDefinition): McpToolAnnotations {
+  const raw = tool.annotations ?? {};
+  const isReadOnly = raw.readOnlyHint === true;
+  const isDestructive = raw.destructiveHint === true;
+  return {
+    readOnlyHint: isReadOnly,
+    destructiveHint: isDestructive,
+    openWorldHint: raw.openWorldHint ?? false,
+    ...(isReadOnly ? { idempotentHint: true } : isDestructive ? { idempotentHint: false } : {}),
+    ...(raw.idempotentHint !== undefined ? { idempotentHint: raw.idempotentHint } : {})
+  };
+}
+
+export const TOOL_DEFINITIONS: McpToolDefinition[] = RAW_TOOL_DEFINITIONS.map((tool) => ({
+  ...tool,
+  annotations: normalizeToolAnnotations(tool)
+}));

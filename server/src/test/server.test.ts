@@ -123,7 +123,7 @@ test("supports full SX + BX snapshot upload, MCP tools/resources/prompts, optimi
     body: { jsonrpc: "2.0", id: 2, method: "tools/list" }
   });
   const tools = (toolsRes.data.result as { tools: Array<{ name: string }> }).tools;
-  assert.equal(tools.length, 67);
+  assert.equal(tools.length, 72);
 
   const skillRes = await callJson(env, "/mcp", {
     method: "POST",
@@ -1132,7 +1132,7 @@ test("exposes complete SX MCP tool & property descriptions and fieldGuide in sx_
       }>;
     }
   ).tools;
-  assert.equal(tools.length, 67);
+  assert.equal(tools.length, 72);
 
   const sxTools = tools.filter((t) => t.name.startsWith("sx_"));
   assert.ok(sxTools.length >= 25);
@@ -1621,4 +1621,691 @@ test("resolves SX expense hour formats in device timezone, accepts note/notes al
   const legacyItem = legacyData.items.find((i) => i.id === 501);
   assert.equal(legacyItem?.amount, 12);
   assert.equal(legacyItem?.localDate, "2026-11-21");
+});
+
+test("enforces SX summary period scoping, BX timezone-aware boundaries & recordedAt, and calories=0 updates", async () => {
+  const env = makeEnv();
+  const shanghaiParts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(new Date());
+  const todayBjt = `${shanghaiParts.find((p) => p.type === "year")!.value}-${shanghaiParts.find((p) => p.type === "month")!.value}-${shanghaiParts.find((p) => p.type === "day")!.value}`;
+  const currentYear = Number(todayBjt.slice(0, 4));
+  const pastYearDate = `${currentYear - 1}-05-01-10`;
+
+  await callJson(env, "/sync/sx/snapshot", {
+    method: "PUT",
+    body: {
+      bundleId: "ai.chaox.sx",
+      appVersion: "1.2.0",
+      permission: "readWrite",
+      policy: {
+        allowRead: true,
+        allowCreate: true,
+        allowUpdate: true,
+        allowDelete: true,
+        allowedDomains: ["projects", "expenses", "incomes", "tags"],
+        consentAcknowledged: true
+      },
+      capabilities: ["catalog", "summary", "expenses"],
+      catalog: {
+        timeZoneIdentifier: "Asia/Shanghai",
+        summaryCurrency: "CNY",
+        supportedCurrencies: ["CNY", "USD"],
+        projects: [
+          { name: "EatingDrinkingOut", currency: "CNY", supportsExpense: true, supportsIncome: false },
+          { name: "CloudSub", currency: "USD", supportsExpense: true, supportsIncome: false }
+        ]
+      },
+      summary: {
+        timeZoneIdentifier: "Asia/Shanghai",
+        summaryCurrency: "CNY",
+        expense: {
+          today: { period: "today", mode: "expense", currency: "CNY", netTotal: 100, recordCount: 1 },
+          month: { period: "month", mode: "expense", currency: "CNY", netTotal: 500, recordCount: 5 },
+          allTime: { period: "allTime", mode: "expense", currency: "CNY", netTotal: 2000, recordCount: 20 }
+        }
+      },
+      datasets: {
+        expenses: [
+          {
+            id: 201,
+            projectId: 1,
+            projectName: "EatingDrinkingOut",
+            amount: 40,
+            netAmount: 40,
+            refundTotal: 0,
+            currency: "CNY",
+            tags: [],
+            notes: "Breakfast",
+            paidAt: `${todayBjt}T01:00:00.000Z`,
+            localDate: todayBjt
+          }
+        ]
+      }
+    }
+  });
+
+  // 1) Queue backdated USD expense (inherits CloudSub currency USD) and today's CNY expense + a refund against today #201.
+  await callJson(env, "/mcp", {
+    method: "POST",
+    body: {
+      jsonrpc: "2.0",
+      id: 1001,
+      method: "tools/call",
+      params: {
+        name: "sx_record_expense",
+        arguments: { amount: 80, projectName: "CloudSub", date: pastYearDate, requestId: "sx-backdated" }
+      }
+    }
+  });
+  await callJson(env, "/mcp", {
+    method: "POST",
+    body: {
+      jsonrpc: "2.0",
+      id: 1002,
+      method: "tools/call",
+      params: {
+        name: "sx_record_expense",
+        arguments: { amount: 25, projectName: "EatingDrinkingOut", date: `${todayBjt}-12`, requestId: "sx-today" }
+      }
+    }
+  });
+  await callJson(env, "/mcp", {
+    method: "POST",
+    body: {
+      jsonrpc: "2.0",
+      id: 1003,
+      method: "tools/call",
+      params: {
+        name: "sx_record_refund",
+        arguments: { paymentId: 201, amount: 10, requestId: "sx-today-ref" }
+      }
+    }
+  });
+
+  const sxTodaySum = await callJson(env, "/mcp", {
+    method: "POST",
+    body: { jsonrpc: "2.0", id: 1004, method: "tools/call", params: { name: "sx_get_summary", arguments: { period: "today" } } }
+  });
+  const sxTodayData = JSON.parse(((sxTodaySum.data.result as { content: Array<{ text: string }> }).content[0]).text) as {
+    optimisticOverlay: {
+      excludedOutOfPeriodCount: number;
+      pendingTotalsByCurrency: Record<string, number>;
+      optimisticSameCurrencyTotal: number;
+    };
+  };
+  assert.equal(sxTodayData.optimisticOverlay.excludedOutOfPeriodCount, 1);
+  assert.equal(sxTodayData.optimisticOverlay.pendingTotalsByCurrency.USD, undefined);
+  assert.equal(sxTodayData.optimisticOverlay.pendingTotalsByCurrency.CNY, 15);
+  assert.equal(sxTodayData.optimisticOverlay.optimisticSameCurrencyTotal, 115);
+
+  const sxAllTimeSum = await callJson(env, "/mcp", {
+    method: "POST",
+    body: { jsonrpc: "2.0", id: 1005, method: "tools/call", params: { name: "sx_get_summary", arguments: { period: "allTime" } } }
+  });
+  const sxAllData = JSON.parse(((sxAllTimeSum.data.result as { content: Array<{ text: string }> }).content[0]).text) as {
+    optimisticOverlay: { pendingTotalsByCurrency: Record<string, number>; optimisticSameCurrencyTotal: number };
+  };
+  assert.equal(sxAllData.optimisticOverlay.pendingTotalsByCurrency.USD, 80);
+  assert.equal(sxAllData.optimisticOverlay.pendingTotalsByCurrency.CNY, 15);
+  assert.equal(sxAllData.optimisticOverlay.optimisticSameCurrencyTotal, 2015);
+
+  // 2) BX timezone-aware summary & recordedAt (2026-11-22T07:30+08:00 = 2026-11-21T23:30Z must count on 2026-11-22).
+  await callJson(env, "/sync/bx/snapshot", {
+    method: "PUT",
+    body: {
+      bundleId: "com.lizhichao.bx",
+      appVersion: "1.2.0",
+      permission: "readWrite",
+      policy: {
+        allowRead: true,
+        allowCreate: true,
+        allowUpdate: true,
+        allowDelete: true,
+        allowedDomains: ["food", "skin", "toilet"],
+        consentAcknowledged: true
+      },
+      capabilities: ["summary", "food", "skin", "toilet"],
+      catalog: {
+        timeZoneIdentifier: "Asia/Shanghai",
+        mealTypes: ["breakfast", "lunch", "dinner", "snack"],
+        skinProducts: ["sunscreen", "moisturizer", "bodyLotion", "medicine", "other"]
+      },
+      summary: {
+        timeZoneIdentifier: "Asia/Shanghai",
+        today: { date: "2026-11-22", totalCalories: 300, unknownCaloriesCount: 0, mealCount: 1, skinCount: 0, bowelCount: 0, urinationCount: 0, toiletCount: 0 },
+        days: [
+          { date: "2026-11-22", totalCalories: 300, unknownCaloriesCount: 0, mealCount: 1, skinCount: 0, bowelCount: 0, urinationCount: 0, toiletCount: 0 },
+          { date: "2026-11-21", totalCalories: 1500, unknownCaloriesCount: 0, mealCount: 3, skinCount: 0, bowelCount: 0, urinationCount: 0, toiletCount: 0 }
+        ]
+      }
+    }
+  });
+
+  const bxFoodRes = await callJson(env, "/mcp", {
+    method: "POST",
+    body: {
+      jsonrpc: "2.0",
+      id: 1006,
+      method: "tools/call",
+      params: {
+        name: "bx_record_food",
+        arguments: {
+          name: "Morning oats",
+          mealType: "breakfast",
+          calories: 250,
+          recordedAt: "2026-11-22T07:30:00+08:00",
+          requestId: "bx-early-bjt"
+        }
+      }
+    }
+  });
+  const bxFoodParsed = JSON.parse(((bxFoodRes.data.result as { content: Array<{ text: string }> }).content[0]).text) as {
+    resolvedLocalTime?: { localDate: string; localTime: string };
+  };
+  assert.equal(bxFoodParsed.resolvedLocalTime?.localDate, "2026-11-22");
+  assert.equal(bxFoodParsed.resolvedLocalTime?.localTime, "07:30");
+
+  // Bare YYYY-MM-DD in BX must resolve to 12:00 local in Asia/Shanghai (not UTC noon = 20:00).
+  const bxSkinRes = await callJson(env, "/mcp", {
+    method: "POST",
+    body: {
+      jsonrpc: "2.0",
+      id: 1007,
+      method: "tools/call",
+      params: {
+        name: "bx_record_skin",
+        arguments: { product: "sunscreen", name: "Daily SPF", recordedAt: "2026-11-22", requestId: "bx-skin-noon" }
+      }
+    }
+  });
+  const bxSkinParsed = JSON.parse(((bxSkinRes.data.result as { content: Array<{ text: string }> }).content[0]).text) as {
+    normalizedPayload: { recordedAt: string };
+    resolvedLocalTime?: { localDate: string; localTime: string };
+  };
+  assert.equal(bxSkinParsed.resolvedLocalTime?.localDate, "2026-11-22");
+  assert.equal(bxSkinParsed.resolvedLocalTime?.localTime, "12:00");
+  assert.equal(bxSkinParsed.normalizedPayload.recordedAt, "2026-11-22T04:00:00.000Z");
+
+  // Both must appear in 2026-11-22 BX summary, NOT 2026-11-21.
+  const bxSum22 = await callJson(env, "/mcp", {
+    method: "POST",
+    body: { jsonrpc: "2.0", id: 1008, method: "tools/call", params: { name: "bx_get_summary", arguments: { date: "2026-11-22" } } }
+  });
+  const sum22Data = JSON.parse(((bxSum22.data.result as { content: Array<{ text: string }> }).content[0]).text) as {
+    optimisticOverlay: { optimisticTotals: { mealCount: number; totalCalories: number; skinCount: number } };
+  };
+  assert.equal(sum22Data.optimisticOverlay.optimisticTotals.mealCount, 2);
+  assert.equal(sum22Data.optimisticOverlay.optimisticTotals.totalCalories, 550);
+  assert.equal(sum22Data.optimisticOverlay.optimisticTotals.skinCount, 1);
+
+  const bxSum21 = await callJson(env, "/mcp", {
+    method: "POST",
+    body: { jsonrpc: "2.0", id: 1009, method: "tools/call", params: { name: "bx_get_summary", arguments: { date: "2026-11-21" } } }
+  });
+  const sum21Data = JSON.parse(((bxSum21.data.result as { content: Array<{ text: string }> }).content[0]).text) as {
+    optimisticOverlay: { optimisticTotals: { mealCount: number; skinCount: number } };
+  };
+  assert.equal(sum21Data.optimisticOverlay.optimisticTotals.mealCount, 3);
+  assert.equal(sum21Data.optimisticOverlay.optimisticTotals.skinCount, 0);
+
+  // Zero-calorie update must be accepted on bx_update_food.
+  const zeroCalRes = await callJson(env, "/mcp", {
+    method: "POST",
+    body: {
+      jsonrpc: "2.0",
+      id: 1010,
+      method: "tools/call",
+      params: { name: "bx_update_food", arguments: { id: "pending:bx-early-bjt", calories: 0 } }
+    }
+  });
+  assert.equal((zeroCalRes.data.result as { isError?: boolean }).isError, undefined);
+});
+
+test("supports chaox_list_pending, chaox_cancel_pending, in-place pending edits, and transparent synced receipt fallback", async () => {
+  const env = makeEnv();
+  await callJson(env, "/sync/sx/snapshot", {
+    method: "PUT",
+    body: {
+      bundleId: "ai.chaox.sx",
+      appVersion: "1.2.0",
+      permission: "appendOnly",
+      policy: {
+        allowRead: true,
+        allowCreate: true,
+        allowUpdate: false,
+        allowDelete: false,
+        allowedDomains: ["projects", "expenses", "incomes", "tags"],
+        consentAcknowledged: true
+      },
+      capabilities: ["catalog", "expenses"],
+      catalog: {
+        timeZoneIdentifier: "Asia/Shanghai",
+        summaryCurrency: "CNY",
+        supportedCurrencies: ["CNY"],
+        projects: [{ name: "Dining", currency: "CNY", supportsExpense: true }]
+      }
+    }
+  });
+  await callJson(env, "/sync/bx/snapshot", {
+    method: "PUT",
+    body: {
+      bundleId: "com.lizhichao.bx",
+      appVersion: "1.2.0",
+      permission: "appendOnly",
+      policy: {
+        allowRead: true,
+        allowCreate: true,
+        allowUpdate: false,
+        allowDelete: false,
+        allowedDomains: ["food"],
+        consentAcknowledged: true
+      },
+      capabilities: ["food"],
+      catalog: { timeZoneIdentifier: "Asia/Shanghai", mealTypes: ["lunch"] }
+    }
+  });
+
+  await callJson(env, "/mcp", {
+    method: "POST",
+    body: {
+      jsonrpc: "2.0",
+      id: 1101,
+      method: "tools/call",
+      params: { name: "sx_record_expense", arguments: { amount: 30, projectName: "Dining", date: "2026-11-22-11", requestId: "edit-me-sx" } }
+    }
+  });
+  await callJson(env, "/mcp", {
+    method: "POST",
+    body: {
+      jsonrpc: "2.0",
+      id: 1102,
+      method: "tools/call",
+      params: { name: "bx_record_food", arguments: { name: "Noodles", calories: 400, requestId: "edit-me-bx" } }
+    }
+  });
+
+  const pendingList = await callJson(env, "/mcp", {
+    method: "POST",
+    body: { jsonrpc: "2.0", id: 1103, method: "tools/call", params: { name: "chaox_list_pending", arguments: {} } }
+  });
+  const pendingData = JSON.parse(((pendingList.data.result as { content: Array<{ text: string }> }).content[0]).text) as {
+    totalCount: number;
+    items: Array<{ requestId: string; resolvedLocalTime?: { displayDate?: string } }>;
+  };
+  assert.equal(pendingData.totalCount, 2);
+  assert.equal(pendingData.items[0].resolvedLocalTime?.displayDate, "2026-11-22-11");
+
+  // Patch queued SX create in-place under appendOnly (no duplicate inbox row!).
+  const patchSx = await callJson(env, "/mcp", {
+    method: "POST",
+    body: {
+      jsonrpc: "2.0",
+      id: 1104,
+      method: "tools/call",
+      params: { name: "sx_update_expense", arguments: { pendingRequestId: "edit-me-sx", amount: 42.5, hour: 13 } }
+    }
+  });
+  const patchSxData = JSON.parse(((patchSx.data.result as { content: Array<{ text: string }> }).content[0]).text) as {
+    updatedPending: boolean;
+    resolvedLocalTime?: { displayDate: string };
+  };
+  assert.equal(patchSxData.updatedPending, true);
+  assert.equal(patchSxData.resolvedLocalTime?.displayDate, "2026-11-22-13");
+
+  // Patch and then cancel queued BX create via pending:<requestId>.
+  const patchBx = await callJson(env, "/mcp", {
+    method: "POST",
+    body: {
+      jsonrpc: "2.0",
+      id: 1105,
+      method: "tools/call",
+      params: { name: "bx_update_food", arguments: { id: "pending:edit-me-bx", calories: 550 } }
+    }
+  });
+  assert.equal(JSON.parse(((patchBx.data.result as { content: Array<{ text: string }> }).content[0]).text).updatedPending, true);
+
+  const cancelBx = await callJson(env, "/mcp", {
+    method: "POST",
+    body: {
+      jsonrpc: "2.0",
+      id: 1106,
+      method: "tools/call",
+      params: { name: "bx_delete_food", arguments: { id: "pending:edit-me-bx" } }
+    }
+  });
+  assert.equal(JSON.parse(((cancelBx.data.result as { content: Array<{ text: string }> }).content[0]).text).cancelledPending, true);
+
+  // Sync edit-me-sx -> receipt with recordId 888, then test chaox_cancel_pending error + transparent fallback.
+  await callJson(env, "/sync/sx/ack", {
+    method: "POST",
+    body: {
+      receipts: [
+        {
+          schemaVersion: SCHEMA_VERSION,
+          requestId: "edit-me-sx",
+          app: "sx",
+          op: "record_expense",
+          status: "applied",
+          processedAt: "2026-11-22T06:00:00.000Z",
+          recordId: "888"
+        }
+      ]
+    }
+  });
+
+  const cancelSynced = await callJson(env, "/mcp", {
+    method: "POST",
+    body: { jsonrpc: "2.0", id: 1107, method: "tools/call", params: { name: "chaox_cancel_pending", arguments: { requestId: "edit-me-sx" } } }
+  });
+  assert.equal((cancelSynced.data.result as { isError?: boolean }).isError, true);
+  assert.match(((cancelSynced.data.result as { content: Array<{ text: string }> }).content[0]).text, /recordId: 888/);
+
+  // Enable readWrite and confirm pendingRequestId falls back transparently to id 888.
+  await callJson(env, "/sync/sx/snapshot", {
+    method: "PUT",
+    body: {
+      bundleId: "ai.chaox.sx",
+      appVersion: "1.2.0",
+      permission: "readWrite",
+      policy: {
+        allowRead: true,
+        allowCreate: true,
+        allowUpdate: true,
+        allowDelete: true,
+        allowedDomains: ["projects", "expenses"],
+        consentAcknowledged: true
+      },
+      capabilities: ["expenses"]
+    }
+  });
+  const fallbackUpd = await callJson(env, "/mcp", {
+    method: "POST",
+    body: {
+      jsonrpc: "2.0",
+      id: 1108,
+      method: "tools/call",
+      params: { name: "sx_update_expense", arguments: { pendingRequestId: "edit-me-sx", note: "Resolved via receipt" } }
+    }
+  });
+  const fallbackData = JSON.parse(((fallbackUpd.data.result as { content: Array<{ text: string }> }).content[0]).text) as {
+    resolvedFromSyncedReceipt?: boolean;
+    normalizedPayload: { id: number };
+  };
+  assert.equal(fallbackData.resolvedFromSyncedReceipt, true);
+  assert.equal(fallbackData.normalizedPayload.id, 888);
+
+  // Queue another item and test chaox_cancel_pending directly.
+  await callJson(env, "/mcp", {
+    method: "POST",
+    body: {
+      jsonrpc: "2.0",
+      id: 1109,
+      method: "tools/call",
+      params: { name: "sx_record_expense", arguments: { amount: 15, projectName: "Dining", requestId: "cancel-direct" } }
+    }
+  });
+  const cancelledDirect = await callJson(env, "/mcp", {
+    method: "POST",
+    body: { jsonrpc: "2.0", id: 1110, method: "tools/call", params: { name: "chaox_cancel_pending", arguments: { requestId: "cancel-direct" } } }
+  });
+  assert.equal(JSON.parse(((cancelledDirect.data.result as { content: Array<{ text: string }> }).content[0]).text).cancelled, true);
+});
+
+test("computes pre-pagination aggregates, validates projectName with fuzzy suggestions, and overlays refunds & workouts completely", async () => {
+  const env = makeEnv();
+  await callJson(env, "/sync/sx/snapshot", {
+    method: "PUT",
+    body: {
+      bundleId: "ai.chaox.sx",
+      appVersion: "1.2.0",
+      permission: "readWrite",
+      policy: {
+        allowRead: true,
+        allowCreate: true,
+        allowUpdate: true,
+        allowDelete: true,
+        allowedDomains: ["projects", "expenses", "incomes", "tags"],
+        consentAcknowledged: true
+      },
+      capabilities: ["catalog", "expenses", "incomes"],
+      catalog: {
+        timeZoneIdentifier: "Asia/Shanghai",
+        summaryCurrency: "CNY",
+        supportedCurrencies: ["CNY", "USD"],
+        projects: [
+          { name: "EatingDrinkingOut", currency: "CNY", supportsExpense: true, supportsIncome: false },
+          { name: "SaaSTools", currency: "USD", supportsExpense: true, supportsIncome: false },
+          { name: "Consulting", currency: "CNY", supportsExpense: false, supportsIncome: true }
+        ]
+      },
+      datasets: {
+        expenses: [
+          { id: 1, projectId: 1, projectName: "EatingDrinkingOut", amount: 100, netAmount: 100, refundTotal: 0, currency: "CNY", tags: ["Dinner"], notes: "", paidAt: "2026-11-22T10:00:00Z", refunds: [] },
+          { id: 2, projectId: 1, projectName: "EatingDrinkingOut", amount: 50, netAmount: 50, refundTotal: 0, currency: "CNY", tags: ["Dinner"], notes: "", paidAt: "2026-11-21T10:00:00Z", refunds: [] },
+          { id: 3, projectId: 2, projectName: "SaaSTools", amount: 20, netAmount: 20, refundTotal: 0, currency: "USD", tags: ["Tool"], notes: "", paidAt: "2026-11-20T10:00:00Z", refunds: [] }
+        ],
+        incomes: [
+          { id: 10, projectId: 3, projectName: "Consulting", amount: 5000, netAmount: 5000, reversalTotal: 0, currency: "CNY", tags: ["Client"], notes: "", receivedAt: "2026-11-22T04:00:00Z", reversals: [] }
+        ]
+      }
+    }
+  });
+
+  // Queue refund against expense #1 + reversal against income #10.
+  await callJson(env, "/mcp", {
+    method: "POST",
+    body: { jsonrpc: "2.0", id: 1201, method: "tools/call", params: { name: "sx_record_refund", arguments: { paymentId: 1, amount: 25, requestId: "agg-ref-1" } } }
+  });
+  await callJson(env, "/mcp", {
+    method: "POST",
+    body: { jsonrpc: "2.0", id: 1202, method: "tools/call", params: { name: "sx_record_income_reversal", arguments: { incomeId: 10, amount: 500, requestId: "agg-rev-1" } } }
+  });
+
+  // Paginate with limit: 1 and verify aggregates reflect all 3 expenses + pending refund!
+  const expList = await callJson(env, "/mcp", {
+    method: "POST",
+    body: { jsonrpc: "2.0", id: 1203, method: "tools/call", params: { name: "sx_list_expenses", arguments: { limit: 1 } } }
+  });
+  const expData = JSON.parse(((expList.data.result as { content: Array<{ text: string }> }).content[0]).text) as {
+    items: Array<{ id: number; refundTotal: number; netAmount: number }>;
+    aggregates: { recordCount: number; totalsByCurrency: Record<string, { gross: number; refund: number; net: number; count: number }> };
+  };
+  assert.equal(expData.items.length, 1);
+  assert.equal(expData.items[0].refundTotal, 25);
+  assert.equal(expData.items[0].netAmount, 75);
+  assert.equal(expData.aggregates.recordCount, 3);
+  assert.equal(expData.aggregates.totalsByCurrency.CNY.net, 125);
+  assert.equal(expData.aggregates.totalsByCurrency.USD.net, 20);
+
+  const incList = await callJson(env, "/mcp", {
+    method: "POST",
+    body: { jsonrpc: "2.0", id: 1204, method: "tools/call", params: { name: "sx_list_incomes", arguments: { limit: 1 } } }
+  });
+  const incData = JSON.parse(((incList.data.result as { content: Array<{ text: string }> }).content[0]).text) as {
+    items: Array<{ netAmount: number; reversalTotal: number }>;
+    aggregates: { totalsByCurrency: Record<string, { net: number; reversal: number }> };
+  };
+  assert.equal(incData.items[0].reversalTotal, 500);
+  assert.equal(incData.items[0].netAmount, 4500);
+  assert.equal(incData.aggregates.totalsByCurrency.CNY.net, 4500);
+
+  // Updating expense projectName to invalid name suggests close matches and blocks invalid move.
+  const badProjMove = await callJson(env, "/mcp", {
+    method: "POST",
+    body: { jsonrpc: "2.0", id: 1205, method: "tools/call", params: { name: "sx_update_expense", arguments: { id: 1, projectName: "SaaS" } } }
+  });
+  assert.equal((badProjMove.data.result as { isError?: boolean }).isError, true);
+  assert.match(((badProjMove.data.result as { content: Array<{ text: string }> }).content[0]).text, /SaaSTools/);
+
+  // Test BX food/workout aggregates, reorder overlay, clearType, and unknown exercise warning.
+  await callJson(env, "/sync/bx/snapshot", {
+    method: "PUT",
+    body: {
+      bundleId: "com.lizhichao.bx",
+      appVersion: "1.2.0",
+      permission: "readWrite",
+      policy: {
+        allowRead: true,
+        allowCreate: true,
+        allowUpdate: true,
+        allowDelete: true,
+        allowedDomains: ["food", "workouts"],
+        consentAcknowledged: true
+      },
+      capabilities: ["food", "workouts"],
+      datasets: {
+        food: [
+          { id: "f1", eatenAt: "2026-11-22T04:00:00Z", meal: "lunch", name: "Rice", calories: 500 },
+          { id: "f2", eatenAt: "2026-11-22T10:00:00Z", meal: "dinner", name: "Soup", calories: 300 }
+        ],
+        exercises: [
+          { id: "ex-bench", key: "barbellBenchPress", nameZh: "杠铃卧推", nameEn: "Barbell Bench Press", group: "chest", equipment: ["barbell"] }
+        ],
+        workouts: [
+          {
+            id: "w1",
+            source: "apple_health",
+            start: "2026-11-22T08:00:00Z",
+            end: "2026-11-22T08:45:00Z",
+            durationMinutes: 45,
+            activeEnergyKcal: 320,
+            healthActivityType: 3000,
+            healthActivityName: "Other",
+            chosenActivityName: "Strength",
+            effectiveActivityName: "Strength",
+            canChooseType: true,
+            frameReadOnly: true,
+            exercises: [
+              { entryId: "e1", workoutId: "w1", exerciseId: "ex-bench", exerciseKey: "barbellBenchPress", position: 0, setGroups: [{ reps: 10, sets: 3, weightKg: 60 }] },
+              { entryId: "e2", workoutId: "w1", exerciseId: "ex-bench", exerciseKey: "barbellBenchPress", position: 1, setGroups: [{ reps: 8, sets: 2, weightKg: 70 }] }
+            ]
+          }
+        ]
+      }
+    }
+  });
+
+  await callJson(env, "/mcp", {
+    method: "POST",
+    body: { jsonrpc: "2.0", id: 1206, method: "tools/call", params: { name: "bx_reorder_workout_exercises", arguments: { workoutId: "w1", entryIds: ["e2", "e1"] } } }
+  });
+  await callJson(env, "/mcp", {
+    method: "POST",
+    body: { jsonrpc: "2.0", id: 1207, method: "tools/call", params: { name: "bx_update_workout_type", arguments: { workoutId: "w1", activityType: null } } }
+  });
+
+  const wkList = await callJson(env, "/mcp", {
+    method: "POST",
+    body: { jsonrpc: "2.0", id: 1208, method: "tools/call", params: { name: "bx_list_workouts", arguments: {} } }
+  });
+  const wkData = JSON.parse(((wkList.data.result as { content: Array<{ text: string }> }).content[0]).text) as {
+    items: Array<{ effectiveActivityName: string; exercises: Array<{ entryId: string }> }>;
+    aggregates: { totalSets: number; totalVolumeKg: number };
+  };
+  assert.equal(wkData.items[0].effectiveActivityName, "Other");
+  assert.deepEqual(wkData.items[0].exercises.map((e) => e.entryId), ["e2", "e1"]);
+  assert.equal(wkData.aggregates.totalSets, 5);
+  assert.equal(wkData.aggregates.totalVolumeKg, 2920); // 3*10*60 + 2*8*70 = 1800 + 1120 = 2920
+
+  const foodList = await callJson(env, "/mcp", {
+    method: "POST",
+    body: { jsonrpc: "2.0", id: 1209, method: "tools/call", params: { name: "bx_list_food", arguments: { limit: 1 } } }
+  });
+  const foodData = JSON.parse(((foodList.data.result as { content: Array<{ text: string }> }).content[0]).text) as {
+    items: unknown[];
+    aggregates: { recordCount: number; totalCalories: number };
+  };
+  assert.equal(foodData.items.length, 1);
+  assert.equal(foodData.aggregates.recordCount, 2);
+  assert.equal(foodData.aggregates.totalCalories, 800);
+
+  // Unknown exercise gives warning + suggestedExercises without breaking enqueue.
+  const warnEx = await callJson(env, "/mcp", {
+    method: "POST",
+    body: { jsonrpc: "2.0", id: 1210, method: "tools/call", params: { name: "bx_add_workout_exercise", arguments: { workoutId: "w1", exercise: "Bench Pres Typo" } } }
+  });
+  const warnData = JSON.parse(((warnEx.data.result as { content: Array<{ text: string }> }).content[0]).text) as {
+    exerciseWarning?: string;
+    suggestedExercises?: Array<{ key: string }>;
+  };
+  assert.match(warnData.exerciseWarning ?? "", /library/);
+  assert.equal(warnData.suggestedExercises?.[0]?.key, "barbellBenchPress");
+});
+
+test("exposes chaox_get_briefing, chaox_get_preferences/chaox_update_preferences, protocol negotiation, and scoped /mcp endpoints", async () => {
+  const env = makeEnv();
+
+  // Save preferences via append, then verify in chaox_get_preferences and chaox_get_status.
+  const prefUpd = await callJson(env, "/mcp", {
+    method: "POST",
+    body: { jsonrpc: "2.0", id: 1301, method: "tools/call", params: { name: "chaox_update_preferences", arguments: { append: "- Log coffee under EatingDrinkingOut" } } }
+  });
+  const prefData = JSON.parse(((prefUpd.data.result as { content: Array<{ text: string }> }).content[0]).text) as { content: string };
+  assert.match(prefData.content, /Log coffee under EatingDrinkingOut/);
+
+  // Connect SX readOnly and BX disabled -> chaox_get_briefing reports SX and skips disabled BX cleanly.
+  await callJson(env, "/sync/sx/snapshot", {
+    method: "PUT",
+    body: {
+      bundleId: "ai.chaox.sx",
+      appVersion: "1.2.0",
+      permission: "readOnly",
+      policy: { allowRead: true, allowCreate: false, allowUpdate: false, allowDelete: false, allowedDomains: ["projects", "expenses", "tags"], consentAcknowledged: true },
+      capabilities: ["catalog", "summary"],
+      catalog: { timeZoneIdentifier: "Asia/Shanghai", summaryCurrency: "CNY", projects: [{ name: "EatingDrinkingOut", currency: "CNY", supportsExpense: true }], tags: ["Coffee"] },
+      summary: { summaryCurrency: "CNY", expense: { today: { period: "today", mode: "expense", currency: "CNY", netTotal: 28, recordCount: 1 } } }
+    }
+  });
+  await callJson(env, "/sync/bx/snapshot", {
+    method: "PUT",
+    body: {
+      bundleId: "com.lizhichao.bx",
+      appVersion: "1.2.0",
+      permission: "disabled",
+      policy: { allowRead: false, allowCreate: false, allowUpdate: false, allowDelete: false, allowedDomains: ["food"], consentAcknowledged: true },
+      capabilities: []
+    }
+  });
+
+  const briefing = await callJson(env, "/mcp", {
+    method: "POST",
+    body: { jsonrpc: "2.0", id: 1302, method: "tools/call", params: { name: "chaox_get_briefing", arguments: {} } }
+  });
+  const briefData = JSON.parse(((briefing.data.result as { content: Array<{ text: string }> }).content[0]).text) as {
+    hasCustomPreferences: boolean;
+    sx: { enabled: boolean; expense: { today: { optimisticSameCurrencyTotal: number } }; expenseProjects: Array<{ name: string }> };
+    bx: { enabled: boolean; reason: string };
+  };
+  assert.equal(briefData.hasCustomPreferences, true);
+  assert.equal(briefData.sx.enabled, true);
+  assert.equal(briefData.sx.expense.today.optimisticSameCurrencyTotal, 28);
+  assert.equal(briefData.sx.expenseProjects[0].name, "EatingDrinkingOut");
+  assert.equal(briefData.bx.enabled, false);
+
+  // Protocol negotiation echoes supported newer version 2025-06-18.
+  const initNew = await callJson(env, "/mcp", {
+    method: "POST",
+    body: { jsonrpc: "2.0", id: 1303, method: "initialize", params: { protocolVersion: "2025-06-18" } }
+  });
+  assert.equal((initNew.data.result as { protocolVersion: string }).protocolVersion, "2025-06-18");
+
+  // Scoped /mcp?apps=sx&readonly=1 filters tools/list and blocks write calls.
+  const scopedList = await callJson(env, "/mcp?apps=sx&readonly=1", {
+    method: "POST",
+    body: { jsonrpc: "2.0", id: 1304, method: "tools/list" }
+  });
+  const scopedTools = (scopedList.data.result as { tools: Array<{ name: string; annotations?: { readOnlyHint?: boolean } }> }).tools;
+  assert.ok(scopedTools.every((t) => t.annotations?.readOnlyHint === true));
+  assert.ok(scopedTools.some((t) => t.name === "sx_list_expenses"));
+  assert.ok(!scopedTools.some((t) => t.name === "bx_list_sleep"));
+
+  const blockedCall = await callJson(env, "/mcp?apps=sx&readonly=1", {
+    method: "POST",
+    body: { jsonrpc: "2.0", id: 1305, method: "tools/call", params: { name: "sx_record_expense", arguments: { amount: 10, projectName: "EatingDrinkingOut" } } }
+  });
+  assert.equal((blockedCall.data.result as { isError?: boolean }).isError, true);
 });
