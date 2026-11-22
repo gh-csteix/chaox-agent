@@ -79,6 +79,17 @@ struct AgentExchangeStoreTests {
         )
         #expect(!splitSnippet.contains("sync-secret-should-not-leak"))
         #expect(splitSnippet.contains(AgentEndpointParser.splitMCPTokenPlaceholder))
+
+        let splitWithMCP = try #require(
+            AgentEndpointParser.mcpConfigSnippet(
+                for: "https://agent.example.com/mcp",
+                token: "sync-secret-should-not-leak",
+                tokenMode: .split,
+                mcpToken: "mcp-real-secret-88"
+            )
+        )
+        #expect(!splitWithMCP.contains("sync-secret-should-not-leak"))
+        #expect(splitWithMCP.contains("Bearer mcp-real-secret-88"))
     }
 
     @Test("AgentEndpointParser builds and round-trips concise client config snippets")
@@ -336,6 +347,50 @@ struct AgentExchangeStoreTests {
         #expect(tokenPasteUpdatesPrefilledURL.url == "https://agent.example.com")
         #expect(tokenPasteUpdatesPrefilledURL.didUpdateURL)
         #expect(tokenPasteUpdatesPrefilledURL.token == "tok_client_1234")
+
+        let threeLineClient = try #require(
+            AgentEndpointParser.clientConfigSnippet(
+                for: "https://agent.example.com",
+                token: "sync_tok_alpha123",
+                mcpToken: "mcp_tok_beta456"
+            )
+        )
+        #expect(threeLineClient == "URL: https://agent.example.com\nSync Token: sync_tok_alpha123\nMCP Token: mcp_tok_beta456")
+
+        let parsedThree = AgentEndpointParser.parse(threeLineClient)
+        #expect(parsedThree.url == "https://agent.example.com")
+        #expect(parsedThree.token == "sync_tok_alpha123")
+        #expect(parsedThree.mcpToken == "mcp_tok_beta456")
+
+        let pastedThree = try #require(
+            AgentEndpointParser.reconcileClipboardPaste(
+                raw: threeLineClient,
+                target: .both,
+                currentURL: "",
+                currentToken: "",
+                currentMCPToken: "",
+                hasEditedURL: false
+            )
+        )
+        #expect(pastedThree.url == "https://agent.example.com")
+        #expect(pastedThree.token == "sync_tok_alpha123")
+        #expect(pastedThree.mcpToken == "mcp_tok_beta456")
+        #expect(pastedThree.didUpdateURL && pastedThree.didUpdateToken && pastedThree.didUpdateMCPToken)
+
+        let pastedMCPJSONIntoMCPField = try #require(
+            AgentEndpointParser.reconcileClipboardPaste(
+                raw: mcpSnippet,
+                target: .mcpToken,
+                currentURL: "https://agent.example.com",
+                currentToken: "keep_sync_tok",
+                currentMCPToken: "",
+                hasEditedURL: true
+            )
+        )
+        #expect(pastedMCPJSONIntoMCPField.token == "keep_sync_tok")
+        #expect(!pastedMCPJSONIntoMCPField.didUpdateToken)
+        #expect(pastedMCPJSONIntoMCPField.mcpToken == "tok_agent_5678")
+        #expect(pastedMCPJSONIntoMCPField.didUpdateMCPToken)
     }
 
     @Test("AgentExchangeStatus computes attentionReceiptCount over first 6 receipts and hasAttentionIssue")

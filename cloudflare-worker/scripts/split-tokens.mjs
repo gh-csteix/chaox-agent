@@ -188,9 +188,10 @@ async function main() {
   const displayUrl = baseUrl ?? "https://<your-worker-url>";
   console.log("4/4 Migration step 1 complete! Update your iOS apps and AI clients using:");
   console.log("\n============================================================");
-  console.log("1) iOS App Config (SX / BX / CSTEIX -> Settings -> AI Assistant -> Edit Endpoint):");
+  console.log("1) iOS App Config (SX / BX / CSTEIX -> Settings -> AI Assistant -> Paste Config):");
   console.log(`URL: ${displayUrl}`);
-  console.log(`Token: ${syncToken}`);
+  console.log(`Sync Token: ${syncToken}`);
+  console.log(`MCP Token: ${mcpToken}`);
 
   console.log("\n2) AI MCP Client Config (Claude / Cursor / Antigravity):");
   console.log(

@@ -247,6 +247,88 @@ struct RemoteExchangeStoreTests {
         let cleared = await store.cachedStatus()
         #expect(!cleared.isConfigured)
         #expect(cleared.tokenMode == .legacy)
+        #expect(!cleared.hasSavedMCPToken)
+        #expect(await store.savedMCPToken() == nil)
+    }
+
+    @Test("testRemoteConnection verifies optional mcpToken against /mcp ping and saveRemoteConfiguration preserves or replaces it")
+    func testAndPersistOptionalMCPToken() async throws {
+        let store = AgentExchangeStore(
+            app: .sx,
+            defaultsSuiteName: "RemoteTests.\(UUID().uuidString)",
+            urlSession: self.makeStubSession(),
+            inMemoryTokenStorage: true
+        )
+
+        final class Capture: @unchecked Sendable {
+            var mcpPingAuths: [String?] = []
+        }
+        let capture = Capture()
+
+        StubURLProtocol.handler = { req, _ in
+            let path = req.url?.path ?? ""
+            if path == "/health" {
+                return (200, Data(#"{"status":"ok","schemaVersion":"chaox-agent/v1","mode":"cloudflare-d1"}"#.utf8))
+            }
+            if path == "/sync/sx/status" {
+                let status = AgentRemoteStatusResponse(
+                    app: .sx,
+                    configured: true,
+                    permission: .readWrite,
+                    tokenMode: .split
+                )
+                return (200, try AgentJSONCoding.encoder.encode(status))
+            }
+            if path == "/mcp" {
+                let auth = req.value(forHTTPHeaderField: "Authorization")
+                capture.mcpPingAuths.append(auth)
+                if auth == "Bearer mcp-good-token" {
+                    return (200, Data(#"{"jsonrpc":"2.0","id":1,"result":{}}"#.utf8))
+                }
+                return (403, Data(#"{"error":"Forbidden"}"#.utf8))
+            }
+            return (404, Data(#"{}"#.utf8))
+        }
+
+        // Swapped/invalid MCP token fails fast with clear error.
+        await #expect(throws: AgentExchangeError.self) {
+            try await store.testRemoteConnection(
+                urlString: "https://agent.example.com",
+                token: "sync-token-123",
+                mcpToken: "sync-token-123",
+                reuseSavedToken: false
+            )
+        }
+
+        try await store.testRemoteConnection(
+            urlString: "https://agent.example.com",
+            token: "sync-token-123",
+            mcpToken: "mcp-good-token",
+            reuseSavedToken: false
+        )
+        #expect(capture.mcpPingAuths.last == "Bearer mcp-good-token")
+
+        try await store.saveRemoteConfiguration(
+            urlString: "https://agent.example.com",
+            token: "sync-token-123",
+            mcpToken: "mcp-good-token"
+        )
+        #expect(await store.hasSavedMCPToken())
+        #expect(await store.savedMCPToken() == "mcp-good-token")
+        #expect(await store.cachedStatus().hasSavedMCPToken)
+
+        // Blank mcpToken during reuseSavedToken preserves existing MCP token.
+        try await store.saveRemoteConfiguration(
+            urlString: "https://agent.example.com",
+            token: "",
+            mcpToken: "",
+            reuseSavedToken: true
+        )
+        #expect(await store.savedMCPToken() == "mcp-good-token")
+
+        await store.clearRemoteConfiguration()
+        #expect(await store.savedMCPToken() == nil)
+        #expect(!(await store.cachedStatus().hasSavedMCPToken))
     }
 
     @Test("cachedStatus returns offline configuration without network calls")

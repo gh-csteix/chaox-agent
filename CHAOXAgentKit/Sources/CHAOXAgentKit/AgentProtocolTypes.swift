@@ -570,6 +570,7 @@ public struct AgentExchangeStatus: Sendable, Equatable {
     public var lastError: String?
     public var remoteEndpointURL: String?
     public var tokenMode: AgentTokenMode
+    public var hasSavedMCPToken: Bool
 
     public var attentionReceiptCount: Int {
         self.recentReceipts.prefix(6).count { receipt in
@@ -590,7 +591,8 @@ public struct AgentExchangeStatus: Sendable, Equatable {
         recentReceipts: [AgentReceipt] = [],
         lastError: String? = nil,
         remoteEndpointURL: String? = nil,
-        tokenMode: AgentTokenMode = .legacy
+        tokenMode: AgentTokenMode = .legacy,
+        hasSavedMCPToken: Bool = false
     ) {
         self.isConfigured = isConfigured
         self.permission = permission
@@ -605,6 +607,7 @@ public struct AgentExchangeStatus: Sendable, Equatable {
         self.lastError = lastError
         self.remoteEndpointURL = remoteEndpointURL
         self.tokenMode = tokenMode
+        self.hasSavedMCPToken = hasSavedMCPToken
     }
 }
 

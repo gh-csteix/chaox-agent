@@ -30,10 +30,11 @@ First, ask me whether I want Option A (Cloudflare — recommended if I want free
 - Verify `GET https://<my-server>/health` returns HTTP `200` (`status: "ok"`), `CHAOX_SYNC_TOKEN` succeeds on `/sync/sx/status`, and `CHAOX_MCP_TOKEN` succeeds on `POST /mcp` (`tools/list`) while receiving `403` on `/sync/*`.
 - Finish by giving me two copy-ready blocks:
 
-1. **App Client Config (uses `CHAOX_SYNC_TOKEN`, works with one-tap `Paste Config` in {APP_NAME})**:
+1. **App Client Config (tapping `Paste Config` in {APP_NAME} fills URL + both keys in one step)**:
 ```
 URL: https://<my-server>
-Token: <my-CHAOX_SYNC_TOKEN>
+Sync Token: <my-CHAOX_SYNC_TOKEN>
+MCP Token: <my-CHAOX_MCP_TOKEN>
 ```
 
 2. **AI MCP Client Config (uses `CHAOX_MCP_TOKEN`)**:

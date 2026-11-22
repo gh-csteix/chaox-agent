@@ -30,10 +30,11 @@
 - 验证 `GET https://<我的域名>/health` 返回 `200 ok`，且分别使用 `CHAOX_SYNC_TOKEN`（`/sync/sx/status` -> `200`）与 `CHAOX_MCP_TOKEN`（`/mcp` `tools/list` -> `200`，`/sync/*` -> `403`）校验权限隔离生效。
 - 完成后，请直接把下面两段配置发给我，方便我在 App 和 AI 客户端里一键复制使用：
 
-1. **{APP_NAME} 客户端配置（使用 `CHAOX_SYNC_TOKEN`，支持在 App 设置页「粘贴配置」自动识别）**：
+1. **{APP_NAME} 客户端配置（在 App 设置页点「粘贴配置」可同时填入同步与 AI 密钥）**：
 ```
 URL: https://<我的域名>
-Token: <我的 CHAOX_SYNC_TOKEN>
+Sync Token: <我的 CHAOX_SYNC_TOKEN>
+MCP Token: <我的 CHAOX_MCP_TOKEN>
 ```
 
 2. **AI 客户端 MCP 配置（使用 `CHAOX_MCP_TOKEN`）**：

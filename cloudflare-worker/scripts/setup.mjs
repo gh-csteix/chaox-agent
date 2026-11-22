@@ -248,9 +248,10 @@ async function main() {
   console.log(`Verified MCP Tools         : ${toolCount}`);
 
   if (verifyTokens.mode === "split") {
-    console.log("\n1) iOS App Client Config (SX / BX / CSTEIX -> Settings -> AI Assistant):");
+    console.log("\n1) iOS App Client Config (SX / BX / CSTEIX -> Settings -> AI Assistant -> Paste Config):");
     console.log(`URL: ${workerUrl}`);
-    console.log(`Token: ${verifyTokens.syncToken}`);
+    console.log(`Sync Token: ${verifyTokens.syncToken}`);
+    console.log(`MCP Token: ${verifyTokens.mcpToken}`);
 
     console.log("\n2) AI MCP Client Config (Claude / Cursor / Antigravity):");
     console.log(

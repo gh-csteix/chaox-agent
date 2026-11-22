@@ -15,6 +15,7 @@ public actor AgentExchangeStore {
     var recentReceiptsKey: String { "\(self.keyPrefix).recentReceipts" }
     var remoteURLKey: String { "\(self.keyPrefix).remoteURL" }
     var remoteTokenAccount: String { "\(self.keyPrefix).remoteToken" }
+    var remoteMCPTokenAccount: String { "\(self.keyPrefix).remoteMCPToken" }
     var tokenModeKey: String { "\(self.keyPrefix).tokenMode" }
 
     private var legacyFolderBookmarkKey: String { "\(self.keyPrefix).folderBookmark" }
@@ -168,9 +169,18 @@ public actor AgentExchangeStore {
         self.savedRemoteToken() != nil
     }
 
+    public func savedMCPToken() -> String? {
+        self.tokenStorage.readToken(account: self.remoteMCPTokenAccount)
+    }
+
+    public func hasSavedMCPToken() -> Bool {
+        self.savedMCPToken() != nil
+    }
+
     public func testRemoteConnection(
         urlString: String,
         token: String,
+        mcpToken: String? = nil,
         reuseSavedToken: Bool = false
     ) async throws {
         let baseURL = try Self.normalizedRemoteURL(urlString)
@@ -199,11 +209,32 @@ public actor AgentExchangeStore {
             body: nil
         )
         _ = try AgentJSONCoding.decoder.decode(AgentRemoteStatusResponse.self, from: statusData)
+
+        if let trimmedMCP = mcpToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !trimmedMCP.isEmpty
+        {
+            let pingBody = Data(#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#.utf8)
+            do {
+                _ = try await self.performRemoteRequest(
+                    baseURL: baseURL,
+                    path: "mcp",
+                    method: "POST",
+                    token: trimmedMCP,
+                    body: pingBody
+                )
+            } catch let AgentExchangeError.remoteRequestFailed(statusCode, _) {
+                throw AgentExchangeError.remoteRequestFailed(
+                    statusCode: statusCode,
+                    message: "AI MCP Token verification failed (HTTP \(statusCode)). Make sure you entered CHAOX_MCP_TOKEN, not CHAOX_SYNC_TOKEN."
+                )
+            }
+        }
     }
 
     public func saveRemoteConfiguration(
         urlString: String,
         token: String,
+        mcpToken: String? = nil,
         reuseSavedToken: Bool = false,
         defaultPermission: AgentPermissionTier = .appendOnly,
         policy: AgentPermissionPolicy? = nil
@@ -212,6 +243,13 @@ public actor AgentExchangeStore {
         let resolvedToken = try self.resolveToken(token, reuseSavedToken: reuseSavedToken)
         if resolvedToken.shouldSave {
             try self.tokenStorage.saveToken(resolvedToken.value, account: self.remoteTokenAccount)
+        }
+        if let trimmedMCP = mcpToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !trimmedMCP.isEmpty
+        {
+            try self.tokenStorage.saveToken(trimmedMCP, account: self.remoteMCPTokenAccount)
+        } else if !reuseSavedToken {
+            self.tokenStorage.deleteToken(account: self.remoteMCPTokenAccount)
         }
 
         let store = self.defaults()
@@ -245,6 +283,7 @@ public actor AgentExchangeStore {
 
     public func clearRemoteConfiguration() {
         self.tokenStorage.deleteToken(account: self.remoteTokenAccount)
+        self.tokenStorage.deleteToken(account: self.remoteMCPTokenAccount)
         let store = self.defaults()
         store.removeObject(forKey: self.remoteURLKey)
         store.removeObject(forKey: self.lastSyncKey)
@@ -287,7 +326,8 @@ public actor AgentExchangeStore {
             recentReceipts: isConfigured ? self.cachedReceipts(from: store) : [],
             lastError: store.string(forKey: self.lastErrorKey),
             remoteEndpointURL: self.savedRemoteURLString(),
-            tokenMode: isConfigured ? self.cachedTokenMode(from: store) : .legacy
+            tokenMode: isConfigured ? self.cachedTokenMode(from: store) : .legacy,
+            hasSavedMCPToken: isConfigured && self.hasSavedMCPToken()
         )
     }
 
@@ -524,7 +564,8 @@ public actor AgentExchangeStore {
                 recentReceipts: decoded.recentReceipts,
                 lastError: nil,
                 remoteEndpointURL: baseURL.absoluteString,
-                tokenMode: resolvedTokenMode
+                tokenMode: resolvedTokenMode,
+                hasSavedMCPToken: self.hasSavedMCPToken()
             )
         } catch {
             let resolvedError = Self.isCancellationError(error) ? cachedError : error.localizedDescription
@@ -537,7 +578,8 @@ public actor AgentExchangeStore {
                 recentReceipts: self.cachedReceipts(from: store),
                 lastError: resolvedError,
                 remoteEndpointURL: baseURL.absoluteString,
-                tokenMode: self.cachedTokenMode(from: store)
+                tokenMode: self.cachedTokenMode(from: store),
+                hasSavedMCPToken: self.hasSavedMCPToken()
             )
         }
     }
