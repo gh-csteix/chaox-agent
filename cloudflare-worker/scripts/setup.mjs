@@ -79,11 +79,11 @@ async function verifyLiveDeployment(workerUrl, token) {
     lastBody = await mcpRes.text();
     if (mcpRes.ok) {
       const parsed = JSON.parse(lastBody);
-      const count = parsed?.result?.tools?.length ?? 0;
-      if (count !== 9) {
-        throw new Error(`Expected 9 MCP tools from live worker, got ${count}`);
+      const tools = parsed?.result?.tools;
+      if (!Array.isArray(tools) || tools.length < 60 || !tools.some((tool) => tool?.name === "chaox_get_status")) {
+        throw new Error(`Expected >= 60 MCP tools (including chaox_get_status) from live worker, got ${tools?.length ?? 0}`);
       }
-      return count;
+      return tools.length;
     }
     if (mcpRes.status === 401 && attempt < 6) {
       await sleep(1500);
@@ -188,7 +188,7 @@ async function main() {
   console.log("\n============================================================");
   console.log("CHAOX Agent Cloudflare Worker deployed and verified!");
   console.log("============================================================");
-  console.log(`SX / BX Cloud Endpoint URL : ${workerUrl}`);
+  console.log(`SX / BX / CSTEIX Endpoint  : ${workerUrl}`);
   console.log(`MCP Streamable HTTP URL    : ${workerUrl}/mcp`);
   console.log(`Bearer Token               : ${token}`);
   console.log(`Verified MCP Tools         : ${toolCount}`);

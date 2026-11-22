@@ -1,5 +1,5 @@
 export const MCP_SERVER_INSTRUCTIONS =
-  "You are connected to a personal CHAOX Agent Protocol v1 gateway backed by the user's own Cloudflare Worker and D1 database. " +
+  "You are connected to a personal CHAOX Agent Protocol v1 gateway backed by the user's own self-hosted server and SQLite/D1 database. " +
   "Always call chaox_get_status first to check each app's granular permission policy (allowRead/allowCreate/allowUpdate/allowDelete and allowedDomains). " +
   "Before recording or querying SX spending, call sx_get_catalog first to read timeZoneIdentifier, active projects (with recentExpenseTags/recentIncomeTags), tags, supportedCurrencies, and fieldGuide. " +
   "SX expenses have calendar-date + 24-hour local hour (00-23) precision, displayed in the SX app as YYYY-MM-DD-HH where the trailing two digits are the 24-hour local hour in timeZoneIdentifier (e.g. 2026-11-22-12 = 12:00 noon, 2026-11-21-00 = midnight/hour unknown — NEVER minutes or a sequence number). Pass ISO-8601 with offset ('2026-11-22T12:00:00+08:00'), 'YYYY-MM-DD-HH', or 'YYYY-MM-DD' + hour (0..23); bare YYYY-MM-DD without hour defaults to local 00:00. " +
@@ -7,12 +7,12 @@ export const MCP_SERVER_INSTRUCTIONS =
   "sx_update_expense and sx_update_income apply partial patches in strict FIFO order on device, so follow-up corrections on the same record id can be queued immediately without waiting for the user to sync first. " +
   "Credential Vault secrets (passwords, TOTP secrets, recovery codes, notes) NEVER leave the device; non-secret credential metadata and links are opt-in under 'credentials'. All SX deletions move items to 30-day Trash. " +
   "In BX, Apple Health sleep nights and workout frames/duration/HR/energy are strictly read-only, while food, topical medicine/skincare, toilet logs, and workout exercise/set annotations support full CRUD when enabled. " +
-  "In CSTEIX, dwell, meditation, marks, and opt-in places (off by default) are strictly read-only snapshots from the iOS app. Private daily Wuxu articles ('wuxu') execute CRUD immediately against D1 with optimistic expectedRevision locking, 30-day soft-delete Trash + restore, and immediate 'applied' receipts (synced back to iOS via GET /sync/csteix/wuxu). " +
-  "SX and BX writes enqueue into D1 inbox until the user's iPhone syncs.";
+  "In CSTEIX, dwell, meditation, marks, and opt-in places (off by default) are strictly read-only snapshots from the iOS app. Private daily Wuxu articles ('wuxu') execute CRUD immediately against the server database with optimistic expectedRevision locking, 30-day soft-delete Trash + restore, and immediate 'applied' receipts (synced back to iOS via GET /sync/csteix/wuxu). " +
+  "SX and BX writes enqueue into the server inbox until the user's iPhone syncs.";
 
 export const SKILL_GUIDE_MARKDOWN = `# CHAOX Agent Skill
 
-Use these MCP tools to read, create, update, and delete permitted records for **SX (Spending X)**, **BX (Body X)**, and **CSTEIX (with private Wuxu articles)** through the user's personal Cloudflare Worker + D1 gateway.
+Use these MCP tools to read, create, update, and delete permitted records for **SX (Spending X)**, **BX (Body X)**, and **CSTEIX (with private Wuxu articles)** through the user's personal CHAOX Agent server (Docker/Node + SQLite, Cloudflare Workers + D1, or any compatible BYOS endpoint).
 
 ## Privacy, Consent & Permission Boundaries
 
@@ -21,8 +21,8 @@ Use these MCP tools to read, create, update, and delete permitted records for **
 3. **SX Trash Recoverability**: All SX delete tools (\`sx_delete_*\`, \`sx_unlink_credential\`) move items to 30-day recoverable Trash. Deleting an SX project is only permitted when it has 0 expenses, 0 income records, and 0 credential links.
 4. **BX Apple Health Read-Only Boundary**: Sleep nights (\`bx_list_sleep\`) and workout timing/duration/energy/heart-rate frames in \`bx_list_workouts\` come from Apple Health and are strictly read-only. Only BX-managed annotations (\`chosenType\` when \`canChooseType: true\`, exercises, equipment, setGroups/weights) and logs (food, skincare/medication, toilet) support CRUD. Body mole skin photos never sync.
 5. **CSTEIX Read-Only Domains & Opt-In Places**: \`dwell\`, \`meditation\`, and \`marks\` (\`csteix_list_dwell\`, \`csteix_list_meditation\`, \`csteix_list_marks\`) are strictly read-only snapshots uploaded by CSTEIX iOS. Location/place names are off by default (\`places\` opt-in scope) and automatically stripped unless explicitly enabled by the user.
-6. **CSTEIX Wuxu Immediate D1 CRUD**: Unlike SX/BX inbox-queued writes, \`csteix_create_wuxu\`, \`csteix_update_wuxu\`, \`csteix_delete_wuxu\`, and \`csteix_restore_wuxu\` apply immediately to the user's D1 \`csteix_wuxu\` table and record an immediate \`applied\` receipt. Use lowercase kebab-case slugs, one or more CSTEIX dimensions (\`chaos\`, \`spacetime\`, \`existence\`, \`ix\`), \`expectedRevision\` for safe concurrent updates, and \`appendBodyZh\`/\`appendRawNotes\` for same-day multi-pass additions. Soft deletes stay recoverable for 30 days via \`csteix_restore_wuxu\`.
-7. **Queued Execution for SX & BX**: SX and BX writes/edits/deletes enqueue in D1 \`inbox\` and apply on-device when SX or BX opens (or via AI Assistant -> Sync). Read tools overlay pending inbox changes where supported.
+6. **CSTEIX Wuxu Immediate Server CRUD**: Unlike SX/BX inbox-queued writes, \`csteix_create_wuxu\`, \`csteix_update_wuxu\`, \`csteix_delete_wuxu\`, and \`csteix_restore_wuxu\` apply immediately to the user's server database \`csteix_wuxu\` table and record an immediate \`applied\` receipt. Use lowercase kebab-case slugs, one or more CSTEIX dimensions (\`chaos\`, \`spacetime\`, \`existence\`, \`ix\`), \`expectedRevision\` for safe concurrent updates, and \`appendBodyZh\`/\`appendRawNotes\` for same-day multi-pass additions. Soft deletes stay recoverable for 30 days via \`csteix_restore_wuxu\`.
+7. **Queued Execution for SX & BX**: SX and BX writes/edits/deletes enqueue in the server \`inbox\` and apply on-device when SX or BX opens (or via AI Assistant -> Sync). Read tools overlay pending inbox changes where supported.
 
 ## Common Workflows
 
@@ -51,7 +51,7 @@ Both tools validate immediately, and \`sx_update_expense\` applies **partial pat
 | \`client\` | Optional short calling AI assistant identifier for audit metadata. |
 
 ### Read Fields Returned by \`sx_list_expenses\`
-- \`id\`: Positive integer expense ID (\`-1\` when still queued in D1 \`inbox\`).
+- \`id\`: Positive integer expense ID (\`-1\` when still queued in server \`inbox\`).
 - \`projectId\`, \`projectName\`: Owning SX project.
 - \`amount\`, \`refundTotal\`, \`netAmount\`: Gross paid amount, sum of non-deleted refunds, and \`amount - refundTotal\` (displayed headline amount).
 - \`currency\`, \`tags\`, \`notes\`: 3-letter ISO currency, applied tag names, and memo string (plural \`notes\`).

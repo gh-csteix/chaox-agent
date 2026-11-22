@@ -4,7 +4,11 @@
 DerivedData/
 node_modules/
 dist/
+data/
 .env
 *.local
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
 wrangler.local.toml
 .wrangler/

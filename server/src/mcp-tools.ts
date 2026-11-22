@@ -31,7 +31,7 @@ export const TOOL_DEFINITIONS = [
     name: "chaox_get_status",
     title: "CHAOX Exchange Status",
     description:
-      "Inspect connected CHAOX apps (sx/bx/csteix), user permission policies, uploaded dataset counts, pending D1 inbox counts, and recent or specific request receipts.",
+      "Inspect connected CHAOX apps (sx/bx/csteix), user permission policies, uploaded dataset counts, pending server inbox counts, and recent or specific request receipts.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: "object",
@@ -1299,7 +1299,7 @@ export const TOOL_DEFINITIONS = [
     }
   },
 
-  // MARK: - CSTEIX Wuxu Articles (Immediate D1 Source of Truth)
+  // MARK: - CSTEIX Wuxu Articles (Immediate Server Database Source of Truth)
   {
     name: "csteix_list_wuxu",
     title: "List CSTEIX Wuxu Articles",
@@ -1344,7 +1344,7 @@ export const TOOL_DEFINITIONS = [
     name: "csteix_create_wuxu",
     title: "Create CSTEIX Wuxu Article",
     description:
-      "Create a new private Wuxu article immediately in D1 and emit an applied receipt. Requires a unique lowercase kebab-case slug, at least one dimension (chaos/spacetime/existence/ix), and bodyZh.",
+      "Create a new private Wuxu article immediately in the server database and emit an applied receipt. Requires a unique lowercase kebab-case slug, at least one dimension (chaos/spacetime/existence/ix), and bodyZh.",
     inputSchema: {
       type: "object",
       required: ["slug", "title", "dimensions", "bodyZh"],
@@ -1375,7 +1375,7 @@ export const TOOL_DEFINITIONS = [
     name: "csteix_update_wuxu",
     title: "Update CSTEIX Wuxu Article",
     description:
-      "Update an existing Wuxu article immediately in D1, incrementing revision and recording an applied receipt. Supports expectedRevision optimistic locking and appendBodyZh/appendBodyEn/appendRawNotes for same-day multi-pass writing.",
+      "Update an existing Wuxu article immediately in the server database, incrementing revision and recording an applied receipt. Supports expectedRevision optimistic locking and appendBodyZh/appendBodyEn/appendRawNotes for same-day multi-pass writing.",
     inputSchema: {
       type: "object",
       properties: {

@@ -4,7 +4,7 @@ import {
   SKILL_GUIDE_MARKDOWN
 } from "./guide.js";
 import { TOOL_DEFINITIONS } from "./mcp-tools.js";
-import { D1ExchangeStore } from "./store.js";
+import { ExchangeStore } from "./store.js";
 import { AgentAppID } from "./types.js";
 
 const SUPPORTED_PROTOCOL_VERSION = "2025-03-26";
@@ -67,7 +67,7 @@ function optStrArr(args: Record<string, unknown>, key: string): string[] | undef
 }
 
 async function dispatchTool(
-  store: D1ExchangeStore,
+  store: ExchangeStore,
   name: string,
   args: Record<string, unknown>
 ): Promise<unknown> {
@@ -621,7 +621,7 @@ async function dispatchTool(
         offset: optNum(args, "offset")
       });
 
-    // CSTEIX Wuxu Articles (Immediate D1 CRUD)
+    // CSTEIX Wuxu Articles (Immediate Server Database CRUD)
     case "csteix_list_wuxu":
       return store.csteix.listWuxu({
         from: optStr(args, "from"),
@@ -693,7 +693,7 @@ async function dispatchTool(
   }
 }
 
-async function handleSingleRpc(msg: JsonRpcRequest, store: D1ExchangeStore): Promise<Response> {
+async function handleSingleRpc(msg: JsonRpcRequest, store: ExchangeStore): Promise<Response> {
   const id = msg.id ?? null;
 
   if (msg.method.startsWith("notifications/")) {
@@ -710,7 +710,7 @@ async function handleSingleRpc(msg: JsonRpcRequest, store: D1ExchangeStore): Pro
           prompts: {}
         },
         serverInfo: {
-          name: "chaox-agent-worker",
+          name: store.getServerName(),
           version: "1.1.0"
         },
         instructions: MCP_SERVER_INSTRUCTIONS
@@ -813,7 +813,7 @@ async function handleSingleRpc(msg: JsonRpcRequest, store: D1ExchangeStore): Pro
   }
 }
 
-export async function handleMcpRequest(request: Request, store: D1ExchangeStore): Promise<Response> {
+export async function handleMcpRequest(request: Request, store: ExchangeStore): Promise<Response> {
   if (request.method !== "POST") {
     return jsonResponse(
       { error: "Method not allowed. Send JSON-RPC requests with POST /mcp." },

@@ -20,12 +20,12 @@ import {
   CsteixWuxuArticle,
   CsteixWuxuImportItem,
   CsteixWuxuSummaryItem,
-  D1LikeDatabase,
-  D1LikePreparedStatement,
   PermissionAction,
   PermissionPolicy,
   Receipt,
-  SCHEMA_VERSION
+  SCHEMA_VERSION,
+  SqlDatabase,
+  SqlPreparedStatement
 } from "./types.js";
 
 export const VALID_CSTEIX_DIMENSIONS: readonly CsteixDimension[] = [
@@ -91,7 +91,7 @@ export interface CsteixWuxuRow {
 }
 
 export interface CsteixStoreContext {
-  getDatabase(): D1LikeDatabase;
+  getDatabase(): SqlDatabase;
   assertReadAccess(app: AgentAppID): Promise<{ row: AppStateRow | null; policy: PermissionPolicy | null }>;
   assertDomainReadAllowed(app: AgentAppID, domain: string): Promise<void>;
   assertActionAllowed(app: AgentAppID, action: PermissionAction, domain: string): Promise<AppStateRow>;
@@ -436,7 +436,7 @@ function accumulateDurationByPillar(
 export class CsteixOperations {
   constructor(private readonly ctx: CsteixStoreContext) {}
 
-  private get db(): D1LikeDatabase {
+  private get db(): SqlDatabase {
     return this.ctx.getDatabase();
   }
 
@@ -448,7 +448,7 @@ export class CsteixOperations {
     const { row, policy } = await this.ctx.assertReadAccess("csteix");
     if (!row || !policy) {
       throw new Error(
-        "App 'csteix' has not synced to this Cloudflare Worker yet. Open CSTEIX Settings -> AI Assistant and connect first."
+        "App 'csteix' has not synced to this CHAOX Agent server yet. Open CSTEIX Settings -> AI Assistant and connect first."
       );
     }
     return {
@@ -478,7 +478,7 @@ export class CsteixOperations {
     return row ? mapReceiptRow(row) : null;
   }
 
-  private makeAppliedReceiptStatement(receipt: Receipt): D1LikePreparedStatement {
+  private makeAppliedReceiptStatement(receipt: Receipt): SqlPreparedStatement {
     return this.db
       .prepare(
         `INSERT INTO receipts (
@@ -840,7 +840,7 @@ export class CsteixOperations {
     };
   }
 
-  // MARK: - Wuxu Immediate CRUD (D1 Source of Truth + Applied Receipts)
+  // MARK: - Wuxu Immediate CRUD (Server Source of Truth + Applied Receipts)
 
   async createWuxu(input: {
     slug: string;
@@ -1447,7 +1447,7 @@ export class CsteixOperations {
     let inserted = 0;
     let updated = 0;
     let unchanged = 0;
-    const statements: D1LikePreparedStatement[] = [];
+    const statements: SqlPreparedStatement[] = [];
 
     for (const item of normalizedItems) {
       const existing = await this.db

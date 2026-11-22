@@ -519,7 +519,7 @@ export class BxOperations {
     if (recordedAt) payload.recordedAt = recordedAt;
 
     const requestId = input.requestId?.trim() || generateRequestId("bx-food");
-    payload.stableID = `bx:d1:${requestId}`;
+    payload.stableID = `bx:remote:${requestId}`;
     return this.ctx.enqueueInbox("bx", "record_food", requestId, input.client, payload);
   }
 
@@ -599,7 +599,7 @@ export class BxOperations {
     if (recordedAt) payload.recordedAt = recordedAt;
 
     const requestId = input.requestId?.trim() || generateRequestId("bx-skin");
-    payload.stableID = `bx:d1:${requestId}`;
+    payload.stableID = `bx:remote:${requestId}`;
     return this.ctx.enqueueInbox("bx", "record_skin", requestId, input.client, payload);
   }
 
@@ -674,7 +674,7 @@ export class BxOperations {
     if (recordedAt) payload.recordedAt = recordedAt;
 
     const requestId = input.requestId?.trim() || generateRequestId("bx-toilet");
-    payload.stableID = `bx:d1:${requestId}`;
+    payload.stableID = `bx:remote:${requestId}`;
     return this.ctx.enqueueInbox("bx", "record_toilet", requestId, input.client, payload);
   }
 
@@ -753,7 +753,7 @@ export class BxOperations {
       payload.sets = validateRawSets(input.sets);
     }
     const requestId = input.requestId?.trim() || generateRequestId("bx-ex-add");
-    payload.stableID = `bx:d1:${requestId}`;
+    payload.stableID = `bx:remote:${requestId}`;
     return this.ctx.enqueueInbox("bx", "add_workout_exercise", requestId, input.client, payload);
   }
 

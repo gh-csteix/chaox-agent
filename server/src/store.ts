@@ -22,31 +22,46 @@ import {
   BxCatalog,
   BxDaySummary,
   BxSummaryBundle,
-  D1LikeDatabase,
-  D1LikePreparedStatement,
   InboxEnvelope,
   PermissionAction,
   PermissionPolicy,
   Receipt,
   SCHEMA_VERSION,
   SnapshotUploadBody,
+  SqlDatabase,
+  SqlPreparedStatement,
   SxCatalog,
   SxSummaryBundle
 } from "./types.js";
 
-export class D1ExchangeStore {
+export class ExchangeStore {
   readonly bx: BxOperations;
   readonly sx: SxOperations;
   readonly csteix: CsteixOperations;
+  private readonly backendMode: string;
+  private readonly defaultClient: string;
 
-  constructor(private readonly db: D1LikeDatabase) {
+  constructor(
+    private readonly db: SqlDatabase,
+    options: { backendMode?: string; defaultClient?: string } = {}
+  ) {
+    this.backendMode = options.backendMode?.trim() || "sqlite";
+    this.defaultClient = options.defaultClient?.trim() || "chaox-agent-server";
     this.bx = new BxOperations(this);
     this.sx = new SxOperations(this);
     this.csteix = new CsteixOperations(this);
   }
 
-  getDatabase(): D1LikeDatabase {
+  getDatabase(): SqlDatabase {
     return this.db;
+  }
+
+  getBackendMode(): string {
+    return this.backendMode;
+  }
+
+  getServerName(): string {
+    return this.defaultClient;
   }
 
   private async getAppState(app: AgentAppID): Promise<AppStateRow | null> {
@@ -69,7 +84,7 @@ export class D1ExchangeStore {
     const { row, policy } = await this.assertReadAccess(app);
     if (!row) {
       throw new Error(
-        `App '${app}' has not synced to this Cloudflare Worker yet. Open ${app.toUpperCase()} Settings -> AI Assistant and connect first.`
+        `App '${app}' has not synced to this CHAOX Agent server yet. Open ${app.toUpperCase()} Settings -> AI Assistant and connect first.`
       );
     }
     if (policy && !policy.allowedDomains.includes(domain)) {
@@ -98,7 +113,7 @@ export class D1ExchangeStore {
     const state = await this.getAppState(app);
     if (!state) {
       throw new Error(
-        `App '${app}' has not synced to this Cloudflare Worker yet. Open ${app.toUpperCase()} Settings -> AI Assistant and connect first.`
+        `App '${app}' has not synced to this CHAOX Agent server yet. Open ${app.toUpperCase()} Settings -> AI Assistant and connect first.`
       );
     }
     const policy = parsePolicyFromRow(state);
@@ -276,7 +291,7 @@ export class D1ExchangeStore {
     });
 
     return {
-      backend: "cloudflare-d1",
+      backend: this.backendMode,
       schemaVersion: SCHEMA_VERSION,
       instructions: MCP_SERVER_INSTRUCTIONS,
       updatedAt: latestUpdate,
@@ -295,7 +310,7 @@ export class D1ExchangeStore {
     const { row, policy } = await this.assertReadAccess("sx");
     const catalog = safeJsonParse<SxCatalog>(row?.catalog_json);
     if (!catalog) {
-      throw new Error("SX catalog is not uploaded yet. Sync SX with this Worker first.");
+      throw new Error("SX catalog is not uploaded yet. Sync SX with this server first.");
     }
     const filtered: SxCatalog = { ...catalog };
     if (policy && !policy.allowedDomains.includes("projects")) {
@@ -325,7 +340,7 @@ export class D1ExchangeStore {
         client: "Optional short calling AI client label (e.g. 'claude', 'cursor')."
       },
       expenseReadFields: {
-        id: "Positive integer record ID (-1 for items still queued in D1 inbox).",
+        id: "Positive integer record ID (-1 for items still queued in server inbox).",
         projectId: "Owning project ID.",
         projectName: "Owning project/category name.",
         amount: "Gross payment amount before refunds.",
@@ -365,7 +380,7 @@ export class D1ExchangeStore {
     const row = await this.getAppState("sx");
     const summary = safeJsonParse<SxSummaryBundle>(row?.summary_json);
     if (!summary) {
-      throw new Error("SX summary is not uploaded yet. Sync SX with this Worker first.");
+      throw new Error("SX summary is not uploaded yet. Sync SX with this server first.");
     }
 
     const period = options.period ?? "month";
@@ -422,7 +437,7 @@ export class D1ExchangeStore {
     const summary = safeJsonParse<BxSummaryBundle>(row?.summary_json);
     const catalog = safeJsonParse<BxCatalog>(row?.catalog_json);
     if (!summary) {
-      throw new Error("BX summary is not uploaded yet. Sync BX with this Worker first.");
+      throw new Error("BX summary is not uploaded yet. Sync BX with this server first.");
     }
 
     const allowFood = !policy || policy.allowedDomains.includes("food");
@@ -543,7 +558,7 @@ export class D1ExchangeStore {
     }
 
     const createdAt = new Date().toISOString();
-    const source = { client: client ?? "chaox-agent-worker" };
+    const source = { client: client ?? this.defaultClient };
 
     await this.db
       .prepare(
@@ -559,7 +574,7 @@ export class D1ExchangeStore {
       requestId,
       createdAt,
       normalizedPayload: payload,
-      note: `Queued in D1 inbox for ${app.toUpperCase()}. It will apply automatically when the app opens or syncs.`
+      note: `Queued in server inbox for ${app.toUpperCase()}. It will apply automatically when the app opens or syncs.`
     };
   }
 
@@ -611,7 +626,7 @@ export class D1ExchangeStore {
       return { ackedCount: 0 };
     }
 
-    const statements: D1LikePreparedStatement[] = [];
+    const statements: SqlPreparedStatement[] = [];
     for (const receipt of receipts) {
       statements.push(
         this.db
@@ -668,7 +683,7 @@ export class D1ExchangeStore {
         : existing?.summary_json ?? null;
     const policyJson = body.policy !== undefined ? JSON.stringify(body.policy) : existing?.policy_json ?? null;
 
-    const statements: D1LikePreparedStatement[] = [
+    const statements: SqlPreparedStatement[] = [
       this.db
         .prepare(
           `INSERT OR REPLACE INTO app_state (
@@ -766,7 +781,7 @@ export class D1ExchangeStore {
 
   async wipeAppData(app: AgentAppID): Promise<Record<string, unknown>> {
     const wipedAt = new Date().toISOString();
-    const statements: D1LikePreparedStatement[] = [
+    const statements: SqlPreparedStatement[] = [
       this.db.prepare("DELETE FROM app_dataset WHERE app = ?").bind(app),
       this.db.prepare("DELETE FROM inbox WHERE app = ?").bind(app),
       this.db.prepare("DELETE FROM receipts WHERE app = ?").bind(app),
@@ -803,3 +818,5 @@ export class D1ExchangeStore {
     return { updatedAt };
   }
 }
+
+export { ExchangeStore as D1ExchangeStore };

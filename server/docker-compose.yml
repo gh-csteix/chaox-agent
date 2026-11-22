@@ -1,0 +1,38 @@
+services:
+  chaox-agent:
+    build: .
+    container_name: chaox-agent-server
+    restart: unless-stopped
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${PORT:-8787}:8787"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8787"
+      CHAOX_AUTH_TOKEN: "${CHAOX_AUTH_TOKEN}"
+      CHAOX_DB_PATH: "${CHAOX_DB_PATH:-/data/chaox-agent.sqlite}"
+      CHAOX_BACKEND_MODE: "${CHAOX_BACKEND_MODE:-sqlite}"
+      CHAOX_SERVER_NAME: "${CHAOX_SERVER_NAME:-chaox-agent-server}"
+    volumes:
+      - ./data:/data
+
+  # Optional automatic Let's Encrypt HTTPS reverse proxy on VPS:
+  # 1. Copy Caddyfile.example -> Caddyfile and set your domain
+  # 2. Run: docker compose --profile caddy up -d
+  caddy:
+    image: caddy:2-alpine
+    container_name: chaox-agent-caddy
+    profiles: ["caddy"]
+    restart: unless-stopped
+    depends_on:
+      - chaox-agent
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

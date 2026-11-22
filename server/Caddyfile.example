@@ -1,0 +1,4 @@
+# Copy to Caddyfile and replace agent.example.com with your DNS A/AAAA domain pointing to this VPS.
+agent.example.com {
+    reverse_proxy chaox-agent:8787
+}

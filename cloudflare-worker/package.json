@@ -1,13 +1,13 @@
 {
   "name": "chaox-agent-worker",
   "version": "1.0.0",
-  "description": "Personal BYOS Cloudflare Workers + D1 MCP and Sync Server for CHAOX Agent Protocol (SX & BX)",
+  "description": "Recommended Cloudflare Workers + D1 adapter for the self-hosted CHAOX Agent Protocol v1 server (SX, BX, CSTEIX)",
   "license": "MIT",
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "tsc",
-    "test": "npm run build && node --test dist/test/*.test.js",
+    "test": "npm run build && node --test dist/cloudflare-worker/src/test/*.test.js",
     "setup": "node scripts/setup.mjs",
     "dev": "wrangler dev --config wrangler.local.toml",
     "deploy": "wrangler deploy",

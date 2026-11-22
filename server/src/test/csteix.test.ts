@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { handleWorkerRequest } from "../index.js";
-import { SCHEMA_VERSION, WorkerEnv } from "../types.js";
-import { createTestDatabase, SqliteD1Database } from "./d1-mock.js";
+import { handleRequest } from "../app.js";
+import { createMemoryDatabase, SqliteDatabase } from "../sqlite.js";
+import { SCHEMA_VERSION, ServerEnv } from "../types.js";
 
-function makeEnv(token = "secret-csteix-token"): { env: WorkerEnv; db: SqliteD1Database } {
-  const db = createTestDatabase();
+function makeEnv(token = "secret-csteix-token"): { env: ServerEnv; db: SqliteDatabase } {
+  const db = createMemoryDatabase();
   return {
     db,
     env: {
@@ -16,7 +16,7 @@ function makeEnv(token = "secret-csteix-token"): { env: WorkerEnv; db: SqliteD1D
 }
 
 async function callJson(
-  env: WorkerEnv,
+  env: ServerEnv,
   pathname: string,
   options: {
     method?: string;
@@ -32,12 +32,12 @@ async function callJson(
     headers["Content-Type"] = "application/json";
   }
 
-  const req = new Request(`https://chaox-test.workers.dev${pathname}`, {
+  const req = new Request(`https://chaox.example.com${pathname}`, {
     method: options.method ?? "GET",
     headers,
     body: options.body !== undefined ? JSON.stringify(options.body) : undefined
   });
-  const res = await handleWorkerRequest(req, env);
+  const res = await handleRequest(req, env);
   const text = await res.text();
   return {
     status: res.status,
@@ -46,7 +46,7 @@ async function callJson(
 }
 
 async function callMcpTool(
-  env: WorkerEnv,
+  env: ServerEnv,
   name: string,
   args: Record<string, unknown> = {}
 ): Promise<{ isError: boolean; text: string; parsed: Record<string, unknown> | null }> {
@@ -70,7 +70,7 @@ async function callMcpTool(
 }
 
 async function connectCsteix(
-  env: WorkerEnv,
+  env: ServerEnv,
   overrides: {
     permission?: string;
     policy?: Record<string, unknown>;

@@ -1,18 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { handleWorkerRequest } from "../index.js";
-import { SCHEMA_VERSION, WorkerEnv } from "../types.js";
-import { createTestDatabase } from "./d1-mock.js";
+import { handleRequest } from "../app.js";
+import { createMemoryDatabase } from "../sqlite.js";
+import { SCHEMA_VERSION, ServerEnv } from "../types.js";
 
-function makeEnv(token = "secret-worker-token"): WorkerEnv {
+function makeEnv(token = "secret-server-token"): ServerEnv {
   return {
-    DB: createTestDatabase(),
+    DB: createMemoryDatabase(),
     CHAOX_AUTH_TOKEN: token
   };
 }
 
 async function callJson(
-  env: WorkerEnv,
+  env: ServerEnv,
   pathname: string,
   options: {
     method?: string;
@@ -28,12 +28,12 @@ async function callJson(
     headers["Content-Type"] = "application/json";
   }
 
-  const req = new Request(`https://chaox-test.workers.dev${pathname}`, {
+  const req = new Request(`https://chaox.example.com${pathname}`, {
     method: options.method ?? "GET",
     headers,
     body: options.body !== undefined ? JSON.stringify(options.body) : undefined
   });
-  const res = await handleWorkerRequest(req, env);
+  const res = await handleRequest(req, env);
   const text = await res.text();
   return {
     status: res.status,
@@ -442,7 +442,7 @@ test("supports full BX sleep/workouts/food/skin/toilet reads, CRUD, workout Heal
   });
   assert.equal((blockedDelete.data.result as { isError?: boolean }).isError, true);
 
-  // Disable sleep domain on next snapshot -> D1 deletes sleep dataset row and rejects bx_list_sleep.
+  // Disable sleep domain on next snapshot -> server deletes sleep dataset row and rejects bx_list_sleep.
   await callJson(env, "/sync/bx/snapshot", {
     method: "PUT",
     body: {
@@ -474,7 +474,7 @@ test("supports full BX sleep/workouts/food/skin/toilet reads, CRUD, workout Heal
   assert.equal((allowedDelete.data.result as { isError?: boolean }).isError, undefined);
 });
 
-test("enforces SX project child lock on delete, full CRUD, and wipes D1 completely on DELETE /sync/:app/data", async () => {
+test("enforces SX project child lock on delete, full CRUD, and wipes app data completely on DELETE /sync/:app/data", async () => {
   const env = makeEnv();
   await callJson(env, "/sync/sx/snapshot", {
     method: "PUT",

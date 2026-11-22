@@ -14,8 +14,8 @@ Use the `chaox-agent` MCP server tools to read and manage permitted records for 
 3. **SX deletes move to Trash**: `sx_delete_*` and `sx_unlink_credential` move items to 30-day recoverable Trash; deleting a project is blocked while it still has expenses, income records, or credential links.
 4. **BX Apple Health data is strictly read-only**: `bx_list_sleep` and workout timing/duration/energy/heart-rate frames in `bx_list_workouts` cannot be created, modified, or deleted via MCP. Full CRUD applies to food, skincare/medication, toilet logs, and workout annotations (exercise selection, equipment, sets, reps, weight kg, and `chosenType` when `canChooseType` is true). Skin lesion photos never leave the device.
 5. **CSTEIX read-only domains & opt-in places**: `dwell`, `meditation`, and `marks` (`csteix_get_summary`, `csteix_list_dwell`, `csteix_list_meditation`, `csteix_list_marks`) are strictly read-only snapshots from CSTEIX iOS. Place/location names are disabled by default and stripped unless the user explicitly enables the `places` scope.
-6. **CSTEIX Wuxu immediate D1 CRUD**: `csteix_create_wuxu`, `csteix_update_wuxu`, `csteix_delete_wuxu`, and `csteix_restore_wuxu` apply immediately to the user's BYOS D1 database and record immediate `applied` receipts (synced to CSTEIX iOS via `GET /sync/csteix/wuxu`). Soft-deleted articles remain restorable for 30 days.
-7. **Async D1 inbox for SX & BX**: SX and BX mutations enqueue into D1 `inbox` and apply on-device when SX or BX opens or syncs. Report clearly whether a change is queued vs confirmed by receipt.
+6. **CSTEIX Wuxu immediate server CRUD**: `csteix_create_wuxu`, `csteix_update_wuxu`, `csteix_delete_wuxu`, and `csteix_restore_wuxu` apply immediately to the user's BYOS server database and record immediate `applied` receipts (synced to CSTEIX iOS via `GET /sync/csteix/wuxu`). Soft-deleted articles remain restorable for 30 days.
+7. **Async server inbox for SX & BX**: SX and BX mutations enqueue into the server `inbox` and apply on-device when SX or BX opens or syncs. Report clearly whether a change is queued vs confirmed by receipt.
 
 ## Cross-App & CRUD Workflows
 

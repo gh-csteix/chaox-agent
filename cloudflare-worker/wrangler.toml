@@ -6,7 +6,7 @@ compatibility_date = "2026-09-01"
 binding = "DB"
 database_name = "chaox-agent"
 database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
-migrations_dir = "migrations"
+migrations_dir = "../server/migrations"
 
 # Set your bearer token as a Wrangler secret before deploying:
 # npx wrangler secret put CHAOX_AUTH_TOKEN

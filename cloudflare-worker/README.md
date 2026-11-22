@@ -1,8 +1,10 @@
-# chaox-agent-worker (BYOS Cloudflare Workers + D1)
+# chaox-agent-worker (Recommended Cloudflare Workers + D1 Adapter)
 
-Self-hosted, **100% free and card-free** personal cloud relay + Streamable HTTP MCP Server for **SX (Spending X)** and **BX (Body X)**.
+**Recommended (optional, free, card-free)** serverless deployment adapter for the core server in [`../server/`](../server/).
 
 Runs inside **your own Cloudflare account** using Workers + D1 (5 GB storage, 5M row reads/day, 100k Worker requests/day free tier with hard caps and **no credit card required**). CHAOX never hosts your data or operates a backend.
+
+> **Prefer not to use Cloudflare?** You do not need Cloudflare at all — all core protocol logic, all 67 MCP tools, and SQLite migrations live in vendor-neutral [`../server/`](../server/). Run it directly on any VPS (Docker + Caddy), Mac mini / NAS (Tailscale), container PaaS, or Node 22.13+. See [`../server/README.md`](../server/README.md).
 
 ---
 
@@ -15,8 +17,8 @@ If you use Claude Code, Cursor, Codex, OpenClaw, or Antigravity, clone this repo
 > Help me deploy `chaox-agent/cloudflare-worker` to my own Cloudflare account:
 > 1. Run `npm install` in `cloudflare-worker/`.
 > 2. Run `npx wrangler whoami`; if I am not logged in, run `npx wrangler login` and wait while I approve access in my browser.
-> 3. Run `npm run setup` to create the free D1 database, write a gitignored `wrangler.local.toml`, apply migrations, deploy the Worker, generate & set `CHAOX_AUTH_TOKEN`, and verify `/health` and `/mcp`.
-> 4. Give me the final Worker URL, MCP URL, and Bearer Token so I can paste them into SX, BX, and my AI client.
+> 3. Run `npm run setup` to create the free D1 database, write a gitignored `wrangler.local.toml`, apply migrations (`../server/migrations`), deploy the Worker, generate & set `CHAOX_AUTH_TOKEN`, and verify `/health` and `/mcp`.
+> 4. Give me the final Worker URL, MCP URL, and Bearer Token so I can paste them into SX, BX, CSTEIX, and my AI client.
 
 ---
 
@@ -33,10 +35,10 @@ What `npm run setup` does safely and idempotently:
 1. Confirms Cloudflare login (`npx wrangler whoami`).
 2. Finds or creates D1 database `chaox-agent` (`wrangler d1 create chaox-agent`).
 3. Writes `wrangler.local.toml` with your personal `database_id` (`wrangler.local.toml` is gitignored so personal IDs are never committed).
-4. Applies `migrations/0001_init.sql` to your remote D1 database.
-5. Deploys the Worker (routes stay closed with HTTP `401` while `CHAOX_AUTH_TOKEN` is unset).
+4. Applies `../server/migrations/*.sql` (`0001_init.sql`, `0002_policy_and_dataset.sql`, `0003_csteix_wuxu.sql`) to your remote D1 database.
+5. Deploys the thin Worker adapter (routes stay closed with HTTP `401` while `CHAOX_AUTH_TOKEN` is unset).
 6. Generates a 32-byte random Bearer token and uploads it via `wrangler secret put CHAOX_AUTH_TOKEN`.
-7. Verifies live `GET <worker-url>/health` (`200 ok`) and authenticated `POST <worker-url>/mcp` (`tools/list` returns 9 tools), then prints copy-ready credentials for SX, BX, and your AI clients.
+7. Verifies live `GET <worker-url>/health` (`200 ok`) and authenticated `POST <worker-url>/mcp` (`tools/list` returns all 67 tools), then prints copy-ready credentials for SX, BX, CSTEIX, and your AI clients.
 
 > Need to bring your own token instead of auto-generating one?
 > `CHAOX_AUTH_TOKEN="your-custom-secret" npm run setup`
@@ -44,8 +46,6 @@ What `npm run setup` does safely and idempotently:
 ---
 
 ### Option 3 — Manual Step-by-Step Commands
-
-If you prefer executing each step manually:
 
 ```bash
 cd cloudflare-worker
@@ -72,17 +72,15 @@ Default `*.workers.dev` hostnames can be throttled on mobile cellular networks i
 
 1. Open **Cloudflare Dashboard -> Workers & Pages -> `chaox-agent-worker` -> Settings -> Domains & Routes**.
 2. Click **Add -> Custom Domain** and enter e.g. `agent.yourdomain.com`.
-3. Cloudflare issues a TLS certificate automatically in seconds. Use `https://agent.yourdomain.com` in SX, BX, and your AI clients.
+3. Cloudflare issues a TLS certificate automatically in seconds. Use `https://agent.yourdomain.com` in SX, BX, CSTEIX, and your AI clients.
 
 ---
 
-## Connect SX & BX on iPhone
+## Connect SX, BX & CSTEIX on iPhone
 
-1. Open **SX -> Settings -> Agent Exchange**.
-2. Switch the top segmented picker to **Cloud Endpoint**.
-3. Enter your **Worker URL** (e.g. `https://chaox-agent-worker.<subdomain>.workers.dev` or custom domain — **without** `/mcp`, though trailing `/mcp` is also stripped automatically) and your **Bearer Token**.
-4. Tap **Connect & Sync** (keep permission at **Append Only** unless you only want reads).
-5. Open **BX -> Settings -> Agent Exchange**, switch to **Cloud Endpoint**, enter the exact same URL and Token, and tap **Connect & Sync**.
+1. Open **SX -> Settings -> AI Assistant** (similarly **BX** and **CSTEIX**).
+2. Enter your **Server URL** (e.g. `https://chaox-agent-worker.<subdomain>.workers.dev` or custom domain — **without** `/mcp`, though trailing `/mcp` is also stripped automatically) and your **Bearer Token** (or paste the client config JSON).
+3. Configure granular permissions (`Read` / `Add` / `Edit` / `Delete` + domain scopes) and tap **Connect & Sync**.
 
 Your token is stored in the iOS Keychain (`AfterFirstUnlockThisDeviceOnly`) and never written to UserDefaults.
 
@@ -109,20 +107,13 @@ Example config snippet (for MCP clients supporting remote HTTP JSON config):
 }
 ```
 
-### Built-in Skills, Preferences & Prompts
+### Built-in Tools, Skills & Preferences
 
 Once connected, any MCP-capable client automatically discovers:
-- **9 Tools**: `chaox_get_status`, `sx_get_catalog`, `sx_get_summary`, `sx_record_expense`, `sx_record_income`, `bx_get_summary`, `bx_record_food`, `bx_record_skin`, `bx_record_toilet`
-- **`instructions` + Resource `chaox://guide/skill`**: Teaches the AI to look up real projects/tags, estimate nutrition transparently from photos, and keep credentials/HealthKit/photos out of scope.
+- **67 Tools** across **SX** (projects, expenses, refunds, incomes, reversals, tags, slogans, opt-in credential metadata/links), **BX** (daily summary, read-only Apple Health sleep & workout frames, workout exercises/sets, food, skin/medication, toilet), **CSTEIX** (read-only dwell/meditation/marks, opt-in places, immediate CRUD + Trash restore for private Wuxu articles), and `chaox_get_status`.
+- **`instructions` + Resource `chaox://guide/skill`**: Explains field semantics (`YYYY-MM-DD-HH` local clock hour, FIFO patches, tag inheritance) and privacy boundaries.
 - **Prompts**: `log_meal_photo` and `daily_review`.
-- **Resource `chaox://guide/preferences`**: Personal Markdown rules stored in your D1 database. Update it anytime with `curl`:
-
-```bash
-curl -X PUT "https://<your-worker-url>/preferences" \
-  -H "Authorization: Bearer <your-token>" \
-  -H "Content-Type: application/json" \
-  -d '{"content":"# My Preferences\n- Default meal project: Daily Meals\n- Default currency: CNY\n- Daily calorie target: 1800 kcal\n"}'
-```
+- **Resource `chaox://guide/preferences`**: Personal Markdown rules stored in your database (`GET` / `PUT /preferences`).
 
 ---
 
@@ -138,12 +129,13 @@ curl -X PUT "https://<your-worker-url>/preferences" \
   ```bash
   openssl rand -hex 32 | npx wrangler secret put CHAOX_AUTH_TOKEN --config wrangler.local.toml
   ```
-  Then update the new token in SX Settings, BX Settings, and your AI client.
-- **Verify locally without Cloudflare**:
+  Then update the new token in SX/BX/CSTEIX Settings and your AI client.
+- **Verify the thin adapter locally**:
   ```bash
   npm test
   ```
+- **Leave Cloudflare at any time**: Export your D1 SQLite database and move it to [`../server/`](../server/) without changing app behavior or tokens. See [`../server/README.md`](../server/README.md).
 - **Common errors**:
-  - `HTTP 401 Unauthorized`: Token mismatch, or you updated `CHAOX_AUTH_TOKEN` seconds ago (wait 2-3s and retry), or forgot to run `wrangler secret put`.
-  - `"App 'sx' has not synced to this Cloudflare Worker yet"`: Tap **Connect & Sync** inside SX Settings on iPhone first so `catalog` and `summary` are uploaded.
+  - `HTTP 401 Unauthorized`: Token mismatch, updated `CHAOX_AUTH_TOKEN` seconds ago (wait 2-3s and retry), or forgot to run `wrangler secret put`.
+  - `"App 'sx' has not synced to this CHAOX Agent server yet"`: Tap **Connect & Sync** inside SX Settings on iPhone first.
   - `No *.workers.dev subdomain registered`: Open **Cloudflare Dashboard -> Workers & Pages** once in your browser to claim your free `*.workers.dev` subdomain, then re-run `npm run setup`.

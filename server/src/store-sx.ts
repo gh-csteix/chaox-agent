@@ -632,7 +632,7 @@ export class SxOperations {
       payload.credentialId = validateId(input.credentialId, "credentialId");
     }
     const requestId = input.requestId?.trim() || generateRequestId("sx-exp");
-    payload.stableID = `sx:d1:${requestId}`;
+    payload.stableID = `sx:remote:${requestId}`;
     const result = await this.ctx.enqueueInbox("sx", "record_expense", requestId, input.client, payload);
     const normalizedPayload = result.normalizedPayload as Record<string, unknown> | undefined;
     const effectiveDate = typeof normalizedPayload?.date === "string" ? normalizedPayload.date : undefined;
@@ -826,7 +826,7 @@ export class SxOperations {
       payload.credentialId = validateId(input.credentialId, "credentialId");
     }
     const requestId = input.requestId?.trim() || generateRequestId("sx-inc");
-    payload.stableID = `sx:d1:${requestId}`;
+    payload.stableID = `sx:remote:${requestId}`;
     return this.ctx.enqueueInbox("sx", "record_income", requestId, input.client, payload);
   }
 

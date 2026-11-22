@@ -23,22 +23,28 @@ export interface PermissionPolicy {
   updatedAt?: string;
 }
 
-export interface D1LikePreparedStatement {
-  bind(...values: unknown[]): D1LikePreparedStatement;
+export interface SqlPreparedStatement {
+  bind(...values: unknown[]): SqlPreparedStatement;
   first<T = Record<string, unknown>>(): Promise<T | null>;
   all<T = Record<string, unknown>>(): Promise<{ results: T[] }>;
   run(): Promise<unknown>;
 }
 
-export interface D1LikeDatabase {
-  prepare(query: string): D1LikePreparedStatement;
-  batch(statements: D1LikePreparedStatement[]): Promise<unknown[]>;
+export interface SqlDatabase {
+  prepare(query: string): SqlPreparedStatement;
+  batch(statements: SqlPreparedStatement[]): Promise<unknown[]>;
 }
 
-export interface WorkerEnv {
-  DB: D1LikeDatabase;
+export interface ServerEnv {
+  DB: SqlDatabase;
   CHAOX_AUTH_TOKEN: string;
+  BACKEND_MODE?: string;
+  SERVER_NAME?: string;
 }
+
+export type D1LikePreparedStatement = SqlPreparedStatement;
+export type D1LikeDatabase = SqlDatabase;
+export type WorkerEnv = ServerEnv;
 
 export interface RequestSource {
   client?: string;
