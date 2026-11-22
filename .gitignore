@@ -1,0 +1,10 @@
+.DS_Store
+.build/
+.swiftpm/
+DerivedData/
+node_modules/
+dist/
+.env
+*.local
+wrangler.local.toml
+.wrangler/

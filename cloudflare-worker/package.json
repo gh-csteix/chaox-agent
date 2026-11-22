@@ -1,0 +1,27 @@
+{
+  "name": "chaox-agent-worker",
+  "version": "1.0.0",
+  "description": "Personal BYOS Cloudflare Workers + D1 MCP and Sync Server for CHAOX Agent Protocol (SX & BX)",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc",
+    "test": "npm run build && node --test dist/test/*.test.js",
+    "setup": "node scripts/setup.mjs",
+    "dev": "wrangler dev --config wrangler.local.toml",
+    "deploy": "wrangler deploy",
+    "deploy:local-config": "wrangler deploy --config wrangler.local.toml",
+    "db:migrate:local": "wrangler d1 migrations apply chaox-agent --local",
+    "db:migrate:remote": "wrangler d1 migrations apply chaox-agent --remote --config wrangler.local.toml"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261119.1",
+    "@types/node": "^22.15.0",
+    "typescript": "^5.7.0",
+    "wrangler": "^4.14.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

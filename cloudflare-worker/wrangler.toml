@@ -1,0 +1,12 @@
+name = "chaox-agent-worker"
+main = "src/index.ts"
+compatibility_date = "2026-09-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "chaox-agent"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+# Set your bearer token as a Wrangler secret before deploying:
+# npx wrangler secret put CHAOX_AUTH_TOKEN
