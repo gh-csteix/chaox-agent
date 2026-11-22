@@ -47,14 +47,13 @@ function resolvedLocalTimeMeta(isoDate: string | undefined, timeZone?: string) {
 function enrichExpenseLocalFields(item: SxExpenseRecord, timeZone?: string): SxExpenseRecord {
   const parts = localDateHourParts(item.paidAt, timeZone);
   if (!parts) return item;
-  const isQueuedMutation = item.pendingStatus === "queued_create" || item.pendingStatus === "queued_update";
-  if (isQueuedMutation || !item.localDate) {
+  if (!item.localDate) {
     item.localDate = parts.localDate;
   }
-  if (isQueuedMutation || item.localHour === undefined || item.localHour === null) {
+  if (item.localHour === undefined || item.localHour === null) {
     item.localHour = parts.localHour;
   }
-  if (isQueuedMutation || !item.displayDate) {
+  if (!item.displayDate) {
     item.displayDate = parts.displayDate;
   }
   return item;
@@ -359,7 +358,7 @@ export class SxOperations {
 
     const timeZone = await this.ctx.readAppTimeZone?.("sx");
     for (const item of items) {
-      if (!item.localDate || item.pendingStatus === "queued_create" || item.pendingStatus === "queued_update") {
+      if (!item.localDate) {
         const key = localDateKey(item.receivedAt, timeZone);
         if (key) item.localDate = key;
       }
@@ -635,10 +634,9 @@ export class SxOperations {
     const requestId = input.requestId?.trim() || generateRequestId("sx-exp");
     payload.stableID = `sx:d1:${requestId}`;
     const result = await this.ctx.enqueueInbox("sx", "record_expense", requestId, input.client, payload);
-    const localTime = resolvedLocalTimeMeta(
-      typeof payload.date === "string" ? payload.date : undefined,
-      timeZone
-    );
+    const normalizedPayload = result.normalizedPayload as Record<string, unknown> | undefined;
+    const effectiveDate = typeof normalizedPayload?.date === "string" ? normalizedPayload.date : undefined;
+    const localTime = resolvedLocalTimeMeta(effectiveDate, timeZone);
     return localTime && result.queued === true ? { ...result, resolvedLocalTime: localTime } : result;
   }
 
@@ -723,10 +721,9 @@ export class SxOperations {
     }
     const requestId = input.requestId?.trim() || generateRequestId("sx-exp-upd");
     const result = await this.ctx.enqueueInbox("sx", "update_expense", requestId, input.client, payload);
-    const localTime = resolvedLocalTimeMeta(
-      typeof payload.date === "string" ? payload.date : undefined,
-      timeZone
-    );
+    const normalizedPayload = result.normalizedPayload as Record<string, unknown> | undefined;
+    const effectiveDate = typeof normalizedPayload?.date === "string" ? normalizedPayload.date : undefined;
+    const localTime = resolvedLocalTimeMeta(effectiveDate, timeZone);
     return localTime && result.queued === true ? { ...result, resolvedLocalTime: localTime } : result;
   }
 

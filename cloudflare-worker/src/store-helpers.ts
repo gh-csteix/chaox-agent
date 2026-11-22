@@ -298,7 +298,7 @@ export function resolveSxTimestamp(
   const trimmed = rawDate.trim();
 
   // Case A: SX display date+hour formats: YYYY-MM-DD-HH, YYYY-MM-DD HH, or YYYY-MM-DDTHH.
-  const displayMatch = /^(\d{4})-(\d{2})-(\d{2})[-T ](\d{2})$/.exec(trimmed);
+  const displayMatch = /^(\d{4})-(\d{1,2})-(\d{1,2})[-T ](\d{1,2})$/.exec(trimmed);
   if (displayMatch) {
     const year = Number(displayMatch[1]);
     const month = Number(displayMatch[2]);
@@ -313,7 +313,7 @@ export function resolveSxTimestamp(
   }
 
   // Case B: Bare calendar date YYYY-MM-DD -> local midnight (or explicit hour) in SX time zone.
-  const dateOnlyMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(trimmed);
+  const dateOnlyMatch = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(trimmed);
   if (dateOnlyMatch) {
     const year = Number(dateOnlyMatch[1]);
     const month = Number(dateOnlyMatch[2]);
@@ -322,7 +322,7 @@ export function resolveSxTimestamp(
   }
 
   // Case C: Local date-time without timezone suffix (YYYY-MM-DD HH:mm[:ss]) -> interpret in SX time zone.
-  const localDateTimeMatch = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,3})?)?$/.exec(
+  const localDateTimeMatch = /^(\d{4})-(\d{1,2})-(\d{1,2})[T ](\d{1,2}):(\d{2})(?::(\d{2})(?:\.\d{1,3})?)?$/.exec(
     trimmed
   );
   if (localDateTimeMatch) {

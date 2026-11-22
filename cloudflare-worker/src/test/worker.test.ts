@@ -1508,4 +1508,117 @@ test("resolves SX expense hour formats in device timezone, accepts note/notes al
   assert.equal(item10AfterFifo?.amount, 21);
   assert.equal(item10AfterFifo?.currency, "CNY");
   assert.equal(item10AfterFifo?.notes, "Panini");
+
+  // 9) Single-digit hour/month/day formats stay in SX's timezone (no UTC fallback), and duplicate retries return canonical resolvedLocalTime.
+  for (const [dateInput, expectedIso] of [
+    ["2026-11-22 9:30", "2026-11-22T01:30:00.000Z"],
+    ["2026-11-22-9", "2026-11-22T01:00:00.000Z"],
+    ["2026-11-5", "2026-11-04T16:00:00.000Z"]
+  ] as const) {
+    const singleDigitRes = await callJson(env, "/mcp", {
+      method: "POST",
+      body: {
+        jsonrpc: "2.0",
+        id: 94,
+        method: "tools/call",
+        params: {
+          name: "sx_record_expense",
+          arguments: {
+            amount: 8,
+            projectName: "EatingDrinkingOut",
+            date: dateInput,
+            requestId: `single-${dateInput.replace(/[^a-z0-9]/gi, "-")}`
+          }
+        }
+      }
+    });
+    const singleData = JSON.parse(((singleDigitRes.data.result as { content: Array<{ text: string }> }).content[0]).text) as {
+      normalizedPayload: { date: string };
+    };
+    assert.equal(singleData.normalizedPayload.date, expectedIso);
+  }
+
+  // Idempotent retry on 'tz-date-hour' (2026-11-22 12:00 BJT) must preserve the original resolvedLocalTime even if retry omits date.
+  const retryRes = await callJson(env, "/mcp", {
+    method: "POST",
+    body: {
+      jsonrpc: "2.0",
+      id: 95,
+      method: "tools/call",
+      params: {
+        name: "sx_record_expense",
+        arguments: {
+          amount: 18.5,
+          projectName: "EatingDrinkingOut",
+          requestId: "tz-date-hour"
+        }
+      }
+    }
+  });
+  const retryData = JSON.parse(((retryRes.data.result as { content: Array<{ text: string }> }).content[0]).text) as {
+    duplicateInInbox: boolean;
+    resolvedLocalTime?: { displayDate: string };
+  };
+  assert.equal(retryData.duplicateInInbox, true);
+  assert.equal(retryData.resolvedLocalTime?.displayDate, "2026-11-22-12");
+
+  // Non-date update on legacy snapshot without timeZoneIdentifier preserves existing localDate.
+  await callJson(env, "/sync/sx/snapshot", {
+    method: "PUT",
+    body: {
+      bundleId: "ai.chaox.sx",
+      appVersion: "0.1.0",
+      permission: "readWrite",
+      policy: {
+        allowRead: true,
+        allowCreate: true,
+        allowUpdate: true,
+        allowDelete: false,
+        allowedDomains: ["projects", "expenses", "incomes", "tags", "slogans"],
+        consentAcknowledged: true
+      },
+      capabilities: ["catalog", "expenses"],
+      catalog: {
+        summaryCurrency: "CNY",
+        supportedCurrencies: ["CNY"],
+        projects: [{ name: "EatingDrinkingOut", currency: "CNY", supportsExpense: true, supportsIncome: false }]
+      },
+      datasets: {
+        expenses: [
+          {
+            id: 501,
+            projectId: 1,
+            projectName: "EatingDrinkingOut",
+            amount: 10,
+            netAmount: 10,
+            refundTotal: 0,
+            currency: "CNY",
+            tags: [],
+            notes: "",
+            paidAt: "2026-11-20T16:00:00Z",
+            localDate: "2026-11-21"
+          }
+        ]
+      }
+    }
+  });
+  await callJson(env, "/mcp", {
+    method: "POST",
+    body: {
+      jsonrpc: "2.0",
+      id: 96,
+      method: "tools/call",
+      params: { name: "sx_update_expense", arguments: { id: 501, amount: 12, requestId: "legacy-amt-only" } }
+    }
+  });
+  const legacyList = await callJson(env, "/mcp", {
+    method: "POST",
+    body: { jsonrpc: "2.0", id: 97, method: "tools/call", params: { name: "sx_list_expenses", arguments: {} } }
+  });
+  const legacyData = JSON.parse(((legacyList.data.result as { content: Array<{ text: string }> }).content[0]).text) as {
+    items: Array<{ id: number; amount: number; localDate?: string }>;
+  };
+  const legacyItem = legacyData.items.find((i) => i.id === 501);
+  assert.equal(legacyItem?.amount, 12);
+  assert.equal(legacyItem?.localDate, "2026-11-21");
 });

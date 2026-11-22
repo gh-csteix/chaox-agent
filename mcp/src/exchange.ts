@@ -335,7 +335,7 @@ function resolveSxTimestamp(
     return undefined;
   }
 
-  const displayMatch = /^(\d{4})-(\d{2})-(\d{2})[-T ](\d{2})$/.exec(trimmed);
+  const displayMatch = /^(\d{4})-(\d{1,2})-(\d{1,2})[-T ](\d{1,2})$/.exec(trimmed);
   if (displayMatch) {
     const parsedHour = Number(displayMatch[4]);
     if (parsedHour < 0 || parsedHour > 23) {
@@ -352,7 +352,7 @@ function resolveSxTimestamp(
     );
   }
 
-  const dateOnlyMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(trimmed);
+  const dateOnlyMatch = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(trimmed);
   if (dateOnlyMatch) {
     return zonedLocalToUtcIso(
       Number(dateOnlyMatch[1]),
@@ -365,7 +365,7 @@ function resolveSxTimestamp(
     );
   }
 
-  const localDateTimeMatch = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,3})?)?$/.exec(
+  const localDateTimeMatch = /^(\d{4})-(\d{1,2})-(\d{1,2})[T ](\d{1,2}):(\d{2})(?::(\d{2})(?:\.\d{1,3})?)?$/.exec(
     trimmed
   );
   if (localDateTimeMatch) {

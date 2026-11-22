@@ -338,6 +338,14 @@ test("resolves SX date, local hour, YYYY-MM-DD-HH format, and notes alias in cat
     });
     assert.equal(withDisplayFormat.normalizedPayload.date, "2026-11-22T01:00:00.000Z");
 
+    const singleDigitTime = await client.recordSxExpense({
+      amount: 15,
+      projectName: "Daily Meals",
+      date: "2026-11-22 9:30",
+      requestId: "mcp-tz-single-digit"
+    });
+    assert.equal(singleDigitTime.normalizedPayload.date, "2026-11-22T01:30:00.000Z");
+
     await assert.rejects(
       () => client.recordSxExpense({ amount: 10, projectName: "Daily Meals", date: "2026-11-22", hour: 25 }),
       /'hour' must be an integer between 0 and 23/
