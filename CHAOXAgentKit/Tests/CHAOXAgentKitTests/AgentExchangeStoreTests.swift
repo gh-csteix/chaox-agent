@@ -368,4 +368,33 @@ struct AgentExchangeStoreTests {
         #expect(statusWithMixedReceipts.attentionReceiptCount == 3)
         #expect(statusWithMixedReceipts.hasAttentionIssue)
     }
+
+    @Test("AgentSetupGuide renders localized prompts for SX, BX, and CSTEIX")
+    func rendersLocalizedSetupGuides() {
+        let enLocale = Locale(identifier: "en")
+        let zhLocale = Locale(identifier: "zh-Hans")
+
+        for (app, expectedName) in [
+            (AgentAppID.sx, "SX (Spending X)"),
+            (AgentAppID.bx, "BX (Body X)"),
+            (AgentAppID.csteix, "CSTEIX"),
+        ] {
+            let enPrompt = AgentSetupGuide.prompt(for: app, locale: enLocale)
+            let zhPrompt = AgentSetupGuide.prompt(for: app, locale: zhLocale)
+
+            for prompt in [enPrompt, zhPrompt] {
+                #expect(prompt.contains(expectedName))
+                #expect(prompt.contains(AgentSetupGuide.repositoryURL))
+                #expect(prompt.contains("cloudflare-worker"))
+                #expect(prompt.contains("server/"))
+                #expect(prompt.contains("URL: https://"))
+                #expect(prompt.contains("Token:"))
+                #expect(prompt.contains("mcpServers"))
+            }
+
+            #expect(enPrompt != zhPrompt)
+            #expect(zhPrompt.contains("方案 A"))
+            #expect(enPrompt.contains("Option A"))
+        }
+    }
 }

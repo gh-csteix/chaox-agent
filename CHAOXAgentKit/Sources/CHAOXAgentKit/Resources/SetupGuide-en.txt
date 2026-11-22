@@ -1,0 +1,47 @@
+Please help me set up my personal CHAOX Agent Protocol v1 (`chaox-agent/v1`) server so I can connect **{APP_NAME}** (the same server also supports SX, BX, and CSTEIX together).
+
+Repository: https://github.com/gh-csteix/chaox-agent
+
+First, ask me whether I want Option A (Cloudflare — recommended if I want free zero-server-upkeep hosting) or Option B (self-hosted without Cloudflare), then guide me step by step or run the commands for me:
+
+### Option A — Cloudflare Workers + D1 (Recommended: Free, No Credit Card)
+- Run `cd cloudflare-worker && npm install && npx wrangler login` (pause so I can approve Cloudflare login in the browser).
+- Run `npm run setup` to create the D1 database, apply `../server/migrations`, generate `CHAOX_AUTH_TOKEN`, deploy, and verify `/health` + `/mcp`.
+- Note: On Mainland China mobile networks, `*.workers.dev` can be throttled, so mention how to bind a custom subdomain in Cloudflare Dashboard if I own a domain.
+
+### Option B — Self-Hosted Docker / Node 22.13+ + SQLite (No Cloudflare Required)
+1. **VPS + Domain (Docker Compose + automatic Caddy HTTPS)**:
+   - Point DNS to the VPS and open ports 80/443.
+   - `cd server`, copy `.env.example` -> `.env` (generate a 64-char hex `CHAOX_AUTH_TOKEN`), copy `Caddyfile.example` -> `Caddyfile` with my domain.
+   - Run `docker compose --profile caddy up -d --build`.
+2. **Mac mini / Home Server / NAS (Tailscale Serve or Funnel)**:
+   - Run `cd server && docker compose up -d --build` (binds only to `127.0.0.1:8787`).
+   - Run `tailscale serve --bg http://127.0.0.1:8787` (private to my tailnet) or `tailscale funnel --bg http://127.0.0.1:8787` (public HTTPS for cloud AI clients).
+3. **Container PaaS (Fly.io / Zeabur / Railway)**:
+   - Deploy `server/Dockerfile`, mount a persistent volume at `/data`, set `CHAOX_AUTH_TOKEN`, expose port `8787` (`/health`).
+4. **Bare Node.js `>= 22.13.0`**:
+   - Run `cd server && npm install && npm run build && CHAOX_AUTH_TOKEN=<token> npm start`, fronted by Nginx/Caddy/Tailscale HTTPS.
+
+### Verification & Final Output
+- Verify `GET https://<my-server>/health` returns HTTP `200` (`status: "ok"`) and `POST https://<my-server>/mcp` (`tools/list` with `Authorization: Bearer <token>`) succeeds.
+- Finish by giving me two copy-ready blocks:
+
+1. **App Client Config** (for one-tap `Paste Config` in {APP_NAME}):
+```
+URL: https://<my-server>
+Token: <my-bearer-token>
+```
+
+2. **AI MCP Client Config**:
+```json
+{
+  "mcpServers": {
+    "chaox-agent": {
+      "url": "https://<my-server>/mcp",
+      "headers": {
+        "Authorization": "Bearer <my-bearer-token>"
+      }
+    }
+  }
+}
+```
