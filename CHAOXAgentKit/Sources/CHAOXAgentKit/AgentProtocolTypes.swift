@@ -8,6 +8,7 @@ public enum AgentAppID: String, Codable, Sendable, CaseIterable {
     case sx
     case bx
     case gx
+    case csteix
 
     public var defaultDomains: [String] {
         switch self {
@@ -15,6 +16,8 @@ public enum AgentAppID: String, Codable, Sendable, CaseIterable {
             ["sleep", "workouts", "food", "skin", "toilet"]
         case .sx:
             ["projects", "expenses", "incomes", "tags", "slogans"]
+        case .csteix:
+            ["wuxu", "dwell", "meditation", "marks"]
         case .gx:
             []
         }
@@ -59,7 +62,8 @@ public enum AgentPermissionTier: String, Codable, Sendable, CaseIterable {
         "record_food",
         "record_skin",
         "record_toilet",
-        "add_workout_exercise"
+        "add_workout_exercise",
+        "create_wuxu"
     ]
 }
 
@@ -196,6 +200,8 @@ public struct AgentPermissionPolicy: Codable, Sendable, Equatable {
             Self.bxOperationRules[operation]
         case .sx:
             Self.sxOperationRules[operation]
+        case .csteix:
+            Self.csteixOperationRules[operation]
         case .gx:
             nil
         }
@@ -246,6 +252,13 @@ public struct AgentPermissionPolicy: Codable, Sendable, Equatable {
         "link_credential": (.create, "credentials"),
         "update_credential_link": (.update, "credentials"),
         "unlink_credential": (.delete, "credentials")
+    ]
+
+    private static let csteixOperationRules: [String: (action: AgentPermissionAction, domain: String)] = [
+        "create_wuxu": (.create, "wuxu"),
+        "update_wuxu": (.update, "wuxu"),
+        "delete_wuxu": (.delete, "wuxu"),
+        "restore_wuxu": (.update, "wuxu")
     ]
 }
 
@@ -717,6 +730,77 @@ public struct AgentRemoteSnapshotRequest: Encodable, Sendable {
         self.catalog = catalog
         self.summary = summary
         self.datasets = datasets
+    }
+}
+
+public struct AgentWuxuArticleDTO: Codable, Sendable, Equatable {
+    public var id: String
+    public var slug: String
+    public var title: String
+    public var titleEn: String?
+    public var dimensions: [String]
+    public var writtenAt: Date
+    public var timezone: String
+    public var bodyZh: String
+    public var bodyEn: String?
+    public var rawNotes: String?
+    public var revision: Int
+    public var deletedAt: Date?
+    public var createdAt: Date
+    public var updatedAt: Date
+
+    public init(
+        id: String,
+        slug: String,
+        title: String,
+        titleEn: String? = nil,
+        dimensions: [String],
+        writtenAt: Date,
+        timezone: String = "Asia/Shanghai",
+        bodyZh: String,
+        bodyEn: String? = nil,
+        rawNotes: String? = nil,
+        revision: Int = 1,
+        deletedAt: Date? = nil,
+        createdAt: Date,
+        updatedAt: Date
+    ) {
+        self.id = id
+        self.slug = slug
+        self.title = title
+        self.titleEn = titleEn
+        self.dimensions = dimensions
+        self.writtenAt = writtenAt
+        self.timezone = timezone
+        self.bodyZh = bodyZh
+        self.bodyEn = bodyEn
+        self.rawNotes = rawNotes
+        self.revision = revision
+        self.deletedAt = deletedAt
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+}
+
+public struct AgentRemoteWuxuDeltaResponse: Codable, Sendable, Equatable {
+    public var schemaVersion: String
+    public var app: AgentAppID
+    public var syncedAt: Date
+    public var totalCount: Int
+    public var articles: [AgentWuxuArticleDTO]
+
+    public init(
+        schemaVersion: String = AgentProtocolConstants.schemaVersion,
+        app: AgentAppID = .csteix,
+        syncedAt: Date,
+        totalCount: Int,
+        articles: [AgentWuxuArticleDTO] = []
+    ) {
+        self.schemaVersion = schemaVersion
+        self.app = app
+        self.syncedAt = syncedAt
+        self.totalCount = totalCount
+        self.articles = articles
     }
 }
 

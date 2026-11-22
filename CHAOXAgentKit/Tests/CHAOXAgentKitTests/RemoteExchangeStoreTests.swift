@@ -827,6 +827,154 @@ struct RemoteExchangeStoreTests {
         #expect(persistedError.contains("Service unavailable"))
     }
 
+    @Test("Enforces CSTEIX default domains, opt-in places exclusion, and Wuxu policy rules")
+    func csteixPolicyRulesAndDefaultDomains() {
+        #expect(AgentAppID.csteix.defaultDomains == ["wuxu", "dwell", "meditation", "marks"])
+        #expect(!AgentAppID.csteix.defaultDomains.contains("places"))
+
+        #expect(AgentPermissionTier.appendOnly.allows(operation: "create_wuxu"))
+        #expect(!AgentPermissionTier.appendOnly.allows(operation: "update_wuxu"))
+        #expect(!AgentPermissionTier.appendOnly.allows(operation: "delete_wuxu"))
+
+        var rwPolicy = AgentPermissionPolicy.preset(for: .readWrite, app: .csteix, consentAcknowledged: true)
+        #expect(rwPolicy.allowedDomains == ["wuxu", "dwell", "meditation", "marks"])
+        #expect(rwPolicy.allows(operation: "create_wuxu", app: .csteix))
+        #expect(rwPolicy.allows(operation: "update_wuxu", app: .csteix))
+        #expect(rwPolicy.allows(operation: "restore_wuxu", app: .csteix))
+        #expect(!rwPolicy.allows(operation: "delete_wuxu", app: .csteix))
+
+        // Read-only CSTEIX domains never permit mutation operations.
+        #expect(!rwPolicy.allows(operation: "delete_dwell", app: .csteix))
+        #expect(!rwPolicy.allows(operation: "update_meditation", app: .csteix))
+        #expect(!rwPolicy.allows(operation: "create_mark", app: .csteix))
+
+        // Opting into allowDelete enables delete_wuxu.
+        rwPolicy.allowDelete = true
+        #expect(rwPolicy.allows(operation: "delete_wuxu", app: .csteix))
+
+        // Turning off the 'wuxu' domain blocks all Wuxu operations.
+        rwPolicy.allowedDomains = ["dwell", "meditation", "marks"]
+        #expect(!rwPolicy.allows(operation: "create_wuxu", app: .csteix))
+        #expect(!rwPolicy.allows(operation: "update_wuxu", app: .csteix))
+        #expect(!rwPolicy.allows(operation: "delete_wuxu", app: .csteix))
+        #expect(!rwPolicy.allows(operation: "restore_wuxu", app: .csteix))
+    }
+
+    @Test("fetchWuxuDelta builds sync/csteix/wuxu query URLs and decodes active and soft-deleted articles")
+    func fetchWuxuDeltaDecodesArticlesAndQueryParams() async throws {
+        let suiteName = "CsteixWuxuTests.\(UUID().uuidString)"
+        let store = AgentExchangeStore(
+            app: .csteix,
+            defaultsSuiteName: suiteName,
+            urlSession: self.makeStubSession(),
+            inMemoryTokenStorage: true
+        )
+
+        // Unconfigured store throws AgentExchangeError.notConfigured.
+        await #expect(throws: AgentExchangeError.self) {
+            _ = try await store.fetchWuxuDelta()
+        }
+
+        final class CapturedRequests: @unchecked Sendable {
+            var pathsAndQueries: [String] = []
+            var authHeaders: [String?] = []
+        }
+        let captured = CapturedRequests()
+
+        StubURLProtocol.handler = { req, _ in
+            let url = try #require(req.url)
+            let pathWithQuery = if let query = url.query {
+                "\(url.path)?\(query)"
+            } else {
+                url.path
+            }
+            captured.pathsAndQueries.append(pathWithQuery)
+            captured.authHeaders.append(req.value(forHTTPHeaderField: "Authorization"))
+
+            let json = """
+            {
+              "schemaVersion": "chaox-agent/v1",
+              "app": "csteix",
+              "syncedAt": "2026-11-22T06:00:00.250Z",
+              "totalCount": 1,
+              "articles": [
+                {
+                  "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                  "slug": "bare-treetops",
+                  "title": "Bare Treetops",
+                  "titleEn": "Bare Treetops EN",
+                  "dimensions": ["existence"],
+                  "writtenAt": "2026-11-21T11:42:00.000Z",
+                  "timezone": "Asia/Shanghai",
+                  "bodyZh": "Opening paragraph.",
+                  "bodyEn": "Opening paragraph EN.",
+                  "rawNotes": "Raw note line.",
+                  "revision": 2,
+                  "deletedAt": null,
+                  "createdAt": "2026-11-21T11:42:00.000Z",
+                  "updatedAt": "2026-11-22T05:30:00.500Z"
+                },
+                {
+                  "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                  "slug": "retired-draft",
+                  "title": "Retired Draft",
+                  "titleEn": null,
+                  "dimensions": ["chaos", "ix"],
+                  "writtenAt": "2026-11-20T05:36:00Z",
+                  "timezone": "Asia/Shanghai",
+                  "bodyZh": "Old body.",
+                  "bodyEn": null,
+                  "rawNotes": null,
+                  "revision": 3,
+                  "deletedAt": "2026-11-22T05:45:00.000Z",
+                  "createdAt": "2026-11-20T05:36:00Z",
+                  "updatedAt": "2026-11-22T05:45:00.000Z"
+                }
+              ]
+            }
+            """
+            return (200, Data(json.utf8))
+        }
+
+        try await store.saveRemoteConfiguration(
+            urlString: "https://chaox.workers.dev/mcp/",
+            token: "csteix-secret-token"
+        )
+
+        // Full delta sync (since == nil, includeDeleted == true).
+        let fullResponse = try await store.fetchWuxuDelta()
+        #expect(fullResponse.schemaVersion == AgentProtocolConstants.schemaVersion)
+        #expect(fullResponse.app == .csteix)
+        #expect(fullResponse.totalCount == 1)
+        #expect(fullResponse.articles.count == 2)
+        #expect(fullResponse.articles[0].slug == "bare-treetops")
+        #expect(fullResponse.articles[0].titleEn == "Bare Treetops EN")
+        #expect(fullResponse.articles[0].dimensions == ["existence"])
+        #expect(fullResponse.articles[0].rawNotes == "Raw note line.")
+        #expect(fullResponse.articles[0].revision == 2)
+        #expect(fullResponse.articles[0].deletedAt == nil)
+        #expect(fullResponse.articles[1].slug == "retired-draft")
+        #expect(fullResponse.articles[1].deletedAt != nil)
+        #expect(captured.pathsAndQueries.last == "/sync/csteix/wuxu?includeDeleted=1")
+        #expect(captured.authHeaders.last == "Bearer csteix-secret-token")
+
+        // Incremental delta sync with explicit since cursor and includeDeleted == false.
+        let cursor = Date(timeIntervalSince1970: 1_795_327_200.125)
+        _ = try await store.fetchWuxuDelta(since: cursor, includeDeleted: false)
+        let lastRequest = try #require(captured.pathsAndQueries.last)
+        let components = try #require(URLComponents(string: "https://chaox.workers.dev\(lastRequest)"))
+        #expect(components.path == "/sync/csteix/wuxu")
+        let queryMap = Dictionary(
+            uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value ?? "") }
+        )
+        #expect(queryMap["includeDeleted"] == "0")
+        let sentSince = try #require(queryMap["since"])
+        let parsedSince = ISO8601DateFormatter()
+        parsedSince.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let decodedCursor = try #require(parsedSince.date(from: sentSince))
+        #expect(abs(decodedCursor.timeIntervalSince(cursor)) < 0.001)
+    }
+
     private static func makeSampleReceipts(count: Int) -> [AgentReceipt] {
         (1 ... count).map { index in
             let receiptStatus: AgentReceiptStatus = switch index {

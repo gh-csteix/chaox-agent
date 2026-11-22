@@ -3,6 +3,7 @@ import {
   MCP_SERVER_INSTRUCTIONS
 } from "./guide.js";
 import { applyBxSummaryDateKey, BxOperations } from "./store-bx.js";
+import { CsteixOperations } from "./store-csteix.js";
 import {
   AppDatasetRow,
   AppStateRow,
@@ -36,17 +37,23 @@ import {
 export class D1ExchangeStore {
   readonly bx: BxOperations;
   readonly sx: SxOperations;
+  readonly csteix: CsteixOperations;
 
   constructor(private readonly db: D1LikeDatabase) {
     this.bx = new BxOperations(this);
     this.sx = new SxOperations(this);
+    this.csteix = new CsteixOperations(this);
+  }
+
+  getDatabase(): D1LikeDatabase {
+    return this.db;
   }
 
   private async getAppState(app: AgentAppID): Promise<AppStateRow | null> {
     return this.db.prepare("SELECT * FROM app_state WHERE app = ?").bind(app).first<AppStateRow>();
   }
 
-  private async assertReadAccess(app: AgentAppID): Promise<{ row: AppStateRow | null; policy: PermissionPolicy | null }> {
+  async assertReadAccess(app: AgentAppID): Promise<{ row: AppStateRow | null; policy: PermissionPolicy | null }> {
     const state = await this.getAppState(app);
     if (!state) return { row: null, policy: null };
     const policy = parsePolicyFromRow(state);
@@ -227,6 +234,10 @@ export class D1ExchangeStore {
     const pendingBx = (
       await this.db.prepare("SELECT COUNT(*) AS cnt FROM inbox WHERE app = 'bx'").first<{ cnt: number }>()
     )?.cnt ?? 0;
+    const pendingCsteix = (
+      await this.db.prepare("SELECT COUNT(*) AS cnt FROM inbox WHERE app = 'csteix'").first<{ cnt: number }>()
+    )?.cnt ?? 0;
+    const activeWuxuCount = await this.csteix.countActiveWuxu();
 
     const countsByApp: Record<string, Record<string, number>> = {};
     for (const ds of datasetRows) {
@@ -240,16 +251,21 @@ export class D1ExchangeStore {
       if (!latestUpdate || row.updated_at > latestUpdate) {
         latestUpdate = row.updated_at;
       }
+      const datasetCounts: Record<string, number> = { ...(countsByApp[row.app] ?? {}) };
+      if (row.app === "csteix") {
+        datasetCounts.wuxu = activeWuxuCount;
+      }
       apps[row.app] = {
         app: row.app,
         bundleId: row.bundle_id,
         appVersion: row.app_version,
         permission: row.permission,
         policy: parsePolicyFromRow(row),
-        datasetCounts: countsByApp[row.app] ?? {},
+        datasetCounts,
         capabilities: safeJsonParse<string[]>(row.capabilities_json) ?? [],
         lastSyncAt: row.last_sync_at ?? row.updated_at,
-        pendingInboxCount: row.app === "sx" ? pendingSx : row.app === "bx" ? pendingBx : 0
+        pendingInboxCount:
+          row.app === "sx" ? pendingSx : row.app === "bx" ? pendingBx : row.app === "csteix" ? pendingCsteix : 0
       };
     }
 
@@ -267,7 +283,8 @@ export class D1ExchangeStore {
       apps,
       pendingInbox: {
         sx: pendingSx,
-        bx: pendingBx
+        bx: pendingBx,
+        csteix: pendingCsteix
       },
       matchedPending: options.requestId ? receiptInfo.pending : undefined,
       recentReceipts: receiptInfo.receipts
@@ -626,9 +643,12 @@ export class D1ExchangeStore {
     ];
 
     if (readRevoked) {
+      // Clears read-only snapshot datasets in app_dataset while preserving csteix_wuxu rows.
       statements.push(this.db.prepare("DELETE FROM app_dataset WHERE app = ?").bind(app));
     } else if (body.datasets && typeof body.datasets === "object") {
       for (const [domain, value] of Object.entries(body.datasets)) {
+        // Wuxu articles live in dedicated csteix_wuxu table, never in app_dataset.
+        if (app === "csteix" && domain === "wuxu") continue;
         const domainAllowed =
           !resolvedPolicy ||
           resolvedPolicy.allowedDomains.includes(domain) ||
@@ -698,12 +718,16 @@ export class D1ExchangeStore {
 
   async wipeAppData(app: AgentAppID): Promise<Record<string, unknown>> {
     const wipedAt = new Date().toISOString();
-    await this.db.batch([
+    const statements: D1LikePreparedStatement[] = [
       this.db.prepare("DELETE FROM app_dataset WHERE app = ?").bind(app),
       this.db.prepare("DELETE FROM inbox WHERE app = ?").bind(app),
       this.db.prepare("DELETE FROM receipts WHERE app = ?").bind(app),
       this.db.prepare("DELETE FROM app_state WHERE app = ?").bind(app)
-    ]);
+    ];
+    if (app === "csteix") {
+      statements.push(this.db.prepare("DELETE FROM csteix_wuxu"));
+    }
+    await this.db.batch(statements);
     return {
       schemaVersion: SCHEMA_VERSION,
       app,

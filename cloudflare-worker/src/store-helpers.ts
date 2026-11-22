@@ -6,10 +6,11 @@ import {
   Receipt
 } from "./types.js";
 
-export const VALID_APPS = new Set<AgentAppID>(["sx", "bx", "gx"]);
+export const VALID_APPS = new Set<AgentAppID>(["sx", "bx", "gx", "csteix"]);
 export const VALID_PERMISSIONS = new Set<PermissionTier>(["disabled", "readOnly", "appendOnly", "readWrite"]);
 export const DEFAULT_BX_DOMAINS = ["sleep", "workouts", "food", "skin", "toilet"] as const;
 export const DEFAULT_SX_DOMAINS = ["projects", "expenses", "incomes", "tags", "slogans"] as const;
+export const DEFAULT_CSTEIX_DOMAINS = ["wuxu", "dwell", "meditation", "marks"] as const;
 
 export interface AppStateRow {
   app: string;
@@ -60,6 +61,7 @@ export interface ReceiptRow {
 export function defaultDomainsForApp(app: AgentAppID): string[] {
   if (app === "bx") return [...DEFAULT_BX_DOMAINS];
   if (app === "sx") return [...DEFAULT_SX_DOMAINS];
+  if (app === "csteix") return [...DEFAULT_CSTEIX_DOMAINS];
   return [];
 }
 

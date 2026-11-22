@@ -582,6 +582,105 @@ async function dispatchTool(
         client: optStr(args, "client")
       });
 
+    // CSTEIX Read-Only Domains
+    case "csteix_get_summary":
+      return store.csteix.getSummary({
+        from: optStr(args, "from"),
+        to: optStr(args, "to")
+      });
+    case "csteix_list_dwell":
+      return store.csteix.listDwell({
+        from: optStr(args, "from"),
+        to: optStr(args, "to"),
+        pillar: optStr(args, "pillar"),
+        limit: optNum(args, "limit"),
+        offset: optNum(args, "offset")
+      });
+    case "csteix_list_meditation":
+      return store.csteix.listMeditation({
+        from: optStr(args, "from"),
+        to: optStr(args, "to"),
+        pillar: optStr(args, "pillar"),
+        limit: optNum(args, "limit"),
+        offset: optNum(args, "offset")
+      });
+    case "csteix_list_marks":
+      return store.csteix.listMarks({
+        from: optStr(args, "from"),
+        to: optStr(args, "to"),
+        kind: optStr(args, "kind"),
+        pillar: optStr(args, "pillar"),
+        limit: optNum(args, "limit"),
+        offset: optNum(args, "offset")
+      });
+
+    // CSTEIX Wuxu Articles (Immediate D1 CRUD)
+    case "csteix_list_wuxu":
+      return store.csteix.listWuxu({
+        from: optStr(args, "from"),
+        to: optStr(args, "to"),
+        dimension: optStr(args, "dimension"),
+        query: optStr(args, "query"),
+        hasRaw: optBool(args, "hasRaw"),
+        hasEn: optBool(args, "hasEn"),
+        includeDeleted: optBool(args, "includeDeleted"),
+        includeBody: optBool(args, "includeBody"),
+        limit: optNum(args, "limit"),
+        offset: optNum(args, "offset")
+      });
+    case "csteix_get_wuxu":
+      return store.csteix.getWuxu({
+        id: optStr(args, "id"),
+        slug: optStr(args, "slug")
+      });
+    case "csteix_create_wuxu":
+      return store.csteix.createWuxu({
+        slug: String(args.slug ?? ""),
+        title: String(args.title ?? ""),
+        titleEn: args.titleEn === null ? null : optStr(args, "titleEn"),
+        dimensions: optStrArr(args, "dimensions") ?? [],
+        writtenAt: optStr(args, "writtenAt"),
+        timezone: optStr(args, "timezone"),
+        bodyZh: String(args.bodyZh ?? ""),
+        bodyEn: args.bodyEn === null ? null : optStr(args, "bodyEn"),
+        rawNotes: args.rawNotes === null ? null : optStr(args, "rawNotes"),
+        requestId: optStr(args, "requestId"),
+        client: optStr(args, "client")
+      });
+    case "csteix_update_wuxu":
+      return store.csteix.updateWuxu({
+        id: optStr(args, "id"),
+        slug: optStr(args, "slug"),
+        expectedRevision: optNum(args, "expectedRevision"),
+        title: optStr(args, "title"),
+        titleEn: args.titleEn === null ? null : optStr(args, "titleEn"),
+        dimensions: optStrArr(args, "dimensions"),
+        writtenAt: optStr(args, "writtenAt"),
+        timezone: optStr(args, "timezone"),
+        bodyZh: optStr(args, "bodyZh"),
+        bodyEn: args.bodyEn === null ? null : optStr(args, "bodyEn"),
+        rawNotes: args.rawNotes === null ? null : optStr(args, "rawNotes"),
+        appendBodyZh: optStr(args, "appendBodyZh"),
+        appendBodyEn: optStr(args, "appendBodyEn"),
+        appendRawNotes: optStr(args, "appendRawNotes"),
+        requestId: optStr(args, "requestId"),
+        client: optStr(args, "client")
+      });
+    case "csteix_delete_wuxu":
+      return store.csteix.deleteWuxu({
+        id: optStr(args, "id"),
+        slug: optStr(args, "slug"),
+        requestId: optStr(args, "requestId"),
+        client: optStr(args, "client")
+      });
+    case "csteix_restore_wuxu":
+      return store.csteix.restoreWuxu({
+        id: optStr(args, "id"),
+        slug: optStr(args, "slug"),
+        requestId: optStr(args, "requestId"),
+        client: optStr(args, "client")
+      });
+
     default:
       throw new Error(`Unknown MCP tool: ${name}`);
   }
@@ -637,7 +736,7 @@ async function handleSingleRpc(msg: JsonRpcRequest, store: D1ExchangeStore): Pro
           {
             uri: "chaox://guide/skill",
             name: "CHAOX Agent Skill Guide",
-            description: "Usage workflow, privacy rules, and cross-app conventions for SX and BX",
+            description: "Usage workflow, privacy rules, and cross-app conventions for SX, BX, and CSTEIX",
             mimeType: "text/markdown"
           },
           {
@@ -689,12 +788,13 @@ async function handleSingleRpc(msg: JsonRpcRequest, store: D1ExchangeStore): Pro
       if (promptName === "daily_review") {
         const dateHint = typeof promptArgs.date === "string" ? promptArgs.date : "today";
         const text =
-          `Review my ${dateHint} summary across SX and BX:\n` +
+          `Review my ${dateHint} summary across SX, BX, and CSTEIX:\n` +
           `1. Call sx_get_summary(period='today', mode='expense') and sx_get_summary(period='today', mode='income').\n` +
           `2. Call bx_get_summary and bx_list_sleep/workouts/food/skin/toilet as permitted.\n` +
-          `3. Highlight committed vs pending inbox changes concisely.`;
+          `3. If CSTEIX is connected, call csteix_get_summary and csteix_list_wuxu for ${dateHint}.\n` +
+          `4. Highlight committed vs pending inbox changes concisely.`;
         return rpcResult(id, {
-          description: "Daily SX + BX check-in",
+          description: "Daily SX + BX + CSTEIX check-in",
           messages: [{ role: "user", content: { type: "text", text } }]
         });
       }

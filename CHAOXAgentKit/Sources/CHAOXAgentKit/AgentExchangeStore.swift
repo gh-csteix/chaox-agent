@@ -330,6 +330,41 @@ public actor AgentExchangeStore {
         return try await self.processRemoteInbox(now: now, handler: handler)
     }
 
+    public func fetchWuxuDelta(
+        since: Date? = nil,
+        includeDeleted: Bool = true
+    ) async throws -> AgentRemoteWuxuDeltaResponse {
+        guard let config = self.remoteEndpointConfig() else {
+            throw AgentExchangeError.notConfigured
+        }
+
+        var queryItems = [
+            URLQueryItem(name: "includeDeleted", value: includeDeleted ? "1" : "0")
+        ]
+        if let since {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            queryItems.append(URLQueryItem(name: "since", value: formatter.string(from: since)))
+        }
+
+        var components = URLComponents()
+        components.queryItems = queryItems
+        let path: String = if let query = components.percentEncodedQuery, !query.isEmpty {
+            "sync/csteix/wuxu?\(query)"
+        } else {
+            "sync/csteix/wuxu"
+        }
+
+        let data = try await self.performRemoteRequest(
+            baseURL: config.baseURL,
+            path: path,
+            method: "GET",
+            token: config.token,
+            body: nil
+        )
+        return try AgentJSONCoding.decoder.decode(AgentRemoteWuxuDeltaResponse.self, from: data)
+    }
+
     private func resolveToken(
         _ token: String,
         reuseSavedToken: Bool

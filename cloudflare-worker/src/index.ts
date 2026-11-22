@@ -102,6 +102,27 @@ export async function handleWorkerRequest(request: Request, env: WorkerEnv): Pro
       return jsonResponse({ error: "Method not allowed" }, 405);
     }
 
+    if (url.pathname === "/sync/csteix/wuxu") {
+      if (request.method === "GET") {
+        const since = url.searchParams.get("since");
+        const rawIncludeDeleted = url.searchParams.get("includeDeleted");
+        const includeDeleted =
+          rawIncludeDeleted === null
+            ? true
+            : rawIncludeDeleted !== "0" && rawIncludeDeleted.toLowerCase() !== "false";
+        return jsonResponse(await store.csteix.getWuxuDelta({ since, includeDeleted }));
+      }
+      return jsonResponse({ error: "Method not allowed" }, 405);
+    }
+
+    if (url.pathname === "/sync/csteix/wuxu/import") {
+      if (request.method === "POST") {
+        const body = (await request.json()) as { articles?: unknown };
+        return jsonResponse(await store.csteix.importWuxuArticles(body.articles));
+      }
+      return jsonResponse({ error: "Method not allowed" }, 405);
+    }
+
     const syncMatch = /^\/sync\/([a-z]+)\/(status|inbox|ack|snapshot|data)$/.exec(url.pathname);
     if (syncMatch) {
       const app = D1ExchangeStore.parseAppId(syncMatch[1]);

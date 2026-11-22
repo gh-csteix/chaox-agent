@@ -31,12 +31,12 @@ export const TOOL_DEFINITIONS = [
     name: "chaox_get_status",
     title: "CHAOX Exchange Status",
     description:
-      "Inspect connected CHAOX apps (sx/bx), user permission policies, uploaded dataset counts, pending D1 inbox counts, and recent or specific request receipts.",
+      "Inspect connected CHAOX apps (sx/bx/csteix), user permission policies, uploaded dataset counts, pending D1 inbox counts, and recent or specific request receipts.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: "object",
       properties: {
-        app: { type: "string", enum: ["sx", "bx"], description: "Filter receipts by app" },
+        app: { type: "string", enum: ["sx", "bx", "csteix"], description: "Filter receipts by app" },
         requestId: { type: "string", description: "Look up a specific queued or processed requestId" },
         receiptLimit: { type: "integer", minimum: 1, maximum: 50, description: "Max recent receipts (default 10)" }
       }
@@ -1028,6 +1028,213 @@ export const TOOL_DEFINITIONS = [
       properties: {
         workoutId: { type: "string", minLength: 1 },
         activityType: { type: ["string", "null"], description: "WorkoutActivity name e.g. traditionalStrengthTraining, or null to clear" },
+        requestId: { type: "string" },
+        client: { type: "string" }
+      }
+    }
+  },
+
+  // MARK: - CSTEIX Reads (Strictly Read-Only: dwell, meditation, marks, opt-in places)
+  {
+    name: "csteix_get_summary",
+    title: "CSTEIX Summary",
+    description:
+      "Read a combined CSTEIX overview across Wuxu articles (count, dimension breakdown, latest article) and strictly read-only dwell, meditation, and marks summaries according to allowedDomains.",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        from: { type: "string", description: "Start date YYYY-MM-DD or ISO-8601" },
+        to: { type: "string", description: "End date YYYY-MM-DD or ISO-8601" }
+      }
+    }
+  },
+  {
+    name: "csteix_list_dwell",
+    title: "List CSTEIX Dwell Records (Read-Only)",
+    description:
+      "Read CSTEIX dwell records synced from the iOS app. Strictly read-only. Place names and coordinates are stripped unless the user explicitly opted into the 'places' scope.",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        from: { type: "string", description: "Start date YYYY-MM-DD or ISO-8601" },
+        to: { type: "string", description: "End date YYYY-MM-DD or ISO-8601" },
+        pillar: { type: "string", description: "Filter by movement/pillar (chaos, spacetime, existence, ix)" },
+        limit: { type: "integer", minimum: 1, maximum: 200 },
+        offset: { type: "integer", minimum: 0 }
+      }
+    }
+  },
+  {
+    name: "csteix_list_meditation",
+    title: "List CSTEIX Meditation Records (Read-Only)",
+    description:
+      "Read CSTEIX meditation sessions synced from the iOS app. Strictly read-only. Place names and coordinates are stripped unless the user explicitly opted into the 'places' scope.",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        from: { type: "string", description: "Start date YYYY-MM-DD or ISO-8601" },
+        to: { type: "string", description: "End date YYYY-MM-DD or ISO-8601" },
+        pillar: { type: "string", description: "Filter by movement/pillar (chaos, spacetime, existence, ix)" },
+        limit: { type: "integer", minimum: 1, maximum: 200 },
+        offset: { type: "integer", minimum: 0 }
+      }
+    }
+  },
+  {
+    name: "csteix_list_marks",
+    title: "List CSTEIX Hand Marks (Read-Only)",
+    description:
+      "Read CSTEIX hand marks (ripples on paper and meteors on night sky) synced from the iOS app. Strictly read-only. Place data is stripped unless 'places' is opted in.",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        from: { type: "string", description: "Start date YYYY-MM-DD or ISO-8601" },
+        to: { type: "string", description: "End date YYYY-MM-DD or ISO-8601" },
+        kind: { type: "string", enum: ["ripple", "meteor"], description: "Filter by mark kind" },
+        pillar: { type: "string", description: "Filter by movement/pillar (chaos, spacetime, existence, ix)" },
+        limit: { type: "integer", minimum: 1, maximum: 200 },
+        offset: { type: "integer", minimum: 0 }
+      }
+    }
+  },
+
+  // MARK: - CSTEIX Wuxu Articles (Immediate D1 Source of Truth)
+  {
+    name: "csteix_list_wuxu",
+    title: "List CSTEIX Wuxu Articles",
+    description:
+      "Search and list private daily Wuxu articles across title, English title, Chinese/English bodies, and raw notes. Returns metadata, section headings, and leaving lines without full bodies unless includeBody is true.",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        from: { type: "string", description: "Start date YYYY-MM-DD (local to article timezone) or ISO-8601" },
+        to: { type: "string", description: "End date YYYY-MM-DD (local to article timezone) or ISO-8601" },
+        dimension: {
+          type: "string",
+          enum: ["chaos", "spacetime", "existence", "ix"],
+          description: "Filter by CSTEIX dimension"
+        },
+        query: { type: "string", description: "Substring search across title, titleEn, bodyZh, bodyEn, and rawNotes" },
+        hasRaw: { type: "boolean", description: "Filter by whether rawNotes is present" },
+        hasEn: { type: "boolean", description: "Filter by whether bodyEn is present" },
+        includeDeleted: { type: "boolean", description: "Include soft-deleted articles in 30-day Trash (default false)" },
+        includeBody: { type: "boolean", description: "Include full bodyZh/bodyEn/rawNotes in list response (default false)" },
+        limit: { type: "integer", minimum: 1, maximum: 200 },
+        offset: { type: "integer", minimum: 0 }
+      }
+    }
+  },
+  {
+    name: "csteix_get_wuxu",
+    title: "Get CSTEIX Wuxu Article",
+    description:
+      "Read a single Wuxu article in full (bodyZh, bodyEn, rawNotes, headings, leavingLines, revision) by UUID id or slug.",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Article UUID" },
+        slug: { type: "string", description: "Article lowercase kebab-case slug" }
+      }
+    }
+  },
+  {
+    name: "csteix_create_wuxu",
+    title: "Create CSTEIX Wuxu Article",
+    description:
+      "Create a new private Wuxu article immediately in D1 and emit an applied receipt. Requires a unique lowercase kebab-case slug, at least one dimension (chaos/spacetime/existence/ix), and bodyZh.",
+    inputSchema: {
+      type: "object",
+      required: ["slug", "title", "dimensions", "bodyZh"],
+      properties: {
+        slug: { type: "string", minLength: 1, description: "Lowercase kebab-case slug (e.g. 'bare-treetops')" },
+        title: { type: "string", minLength: 1, description: "Primary Chinese title" },
+        titleEn: { type: "string", description: "Optional English title" },
+        dimensions: {
+          type: "array",
+          minItems: 1,
+          items: { type: "string", enum: ["chaos", "spacetime", "existence", "ix"] },
+          description: "One or more CSTEIX dimensions"
+        },
+        writtenAt: {
+          type: "string",
+          description: "ISO-8601 timestamp or local 'YYYY-MM-DD HH:mm' in article timezone (defaults to current minute)"
+        },
+        timezone: { type: "string", description: "IANA timezone identifier (default 'Asia/Shanghai')" },
+        bodyZh: { type: "string", minLength: 1, description: "Primary Chinese Markdown body without the # Title/header skeleton" },
+        bodyEn: { type: "string", description: "Optional English Markdown body" },
+        rawNotes: { type: "string", description: "Optional verbatim user raw notes/utterances" },
+        requestId: { type: "string" },
+        client: { type: "string" }
+      }
+    }
+  },
+  {
+    name: "csteix_update_wuxu",
+    title: "Update CSTEIX Wuxu Article",
+    description:
+      "Update an existing Wuxu article immediately in D1, incrementing revision and recording an applied receipt. Supports expectedRevision optimistic locking and appendBodyZh/appendBodyEn/appendRawNotes for same-day multi-pass writing.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Article UUID (provide id or slug)" },
+        slug: { type: "string", description: "Article slug (provide id or slug)" },
+        expectedRevision: {
+          type: "integer",
+          minimum: 1,
+          description: "Optional optimistic lock; fails if current revision differs"
+        },
+        title: { type: "string" },
+        titleEn: { type: ["string", "null"] },
+        dimensions: {
+          type: "array",
+          minItems: 1,
+          items: { type: "string", enum: ["chaos", "spacetime", "existence", "ix"] }
+        },
+        writtenAt: { type: "string" },
+        timezone: { type: "string" },
+        bodyZh: { type: "string", description: "Replace entire Chinese body (cannot combine with appendBodyZh)" },
+        bodyEn: { type: ["string", "null"], description: "Replace or clear English body (cannot combine with appendBodyEn)" },
+        rawNotes: { type: ["string", "null"], description: "Replace or clear raw notes (cannot combine with appendRawNotes)" },
+        appendBodyZh: { type: "string", description: "Append Markdown paragraph/section to bodyZh" },
+        appendBodyEn: { type: "string", description: "Append Markdown paragraph/section to bodyEn" },
+        appendRawNotes: { type: "string", description: "Append verbatim utterances to rawNotes" },
+        requestId: { type: "string" },
+        client: { type: "string" }
+      }
+    }
+  },
+  {
+    name: "csteix_delete_wuxu",
+    title: "Delete CSTEIX Wuxu Article (30-Day Trash)",
+    description:
+      "Soft-delete a Wuxu article by setting deleted_at (recoverable for 30 days via csteix_restore_wuxu) and emit an applied receipt.",
+    annotations: { destructiveHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Article UUID (provide id or slug)" },
+        slug: { type: "string", description: "Article slug (provide id or slug)" },
+        requestId: { type: "string" },
+        client: { type: "string" }
+      }
+    }
+  },
+  {
+    name: "csteix_restore_wuxu",
+    title: "Restore CSTEIX Wuxu Article from Trash",
+    description:
+      "Restore a soft-deleted Wuxu article within its 30-day Trash window, incrementing revision and recording an applied receipt.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Article UUID (provide id or slug)" },
+        slug: { type: "string", description: "Article slug (provide id or slug)" },
         requestId: { type: "string" },
         client: { type: "string" }
       }

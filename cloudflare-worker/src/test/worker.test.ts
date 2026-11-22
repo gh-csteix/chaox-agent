@@ -123,7 +123,7 @@ test("supports full SX + BX snapshot upload, MCP tools/resources/prompts, optimi
     body: { jsonrpc: "2.0", id: 2, method: "tools/list" }
   });
   const tools = (toolsRes.data.result as { tools: Array<{ name: string }> }).tools;
-  assert.equal(tools.length, 57);
+  assert.equal(tools.length, 67);
 
   const skillRes = await callJson(env, "/mcp", {
     method: "POST",

@@ -1,11 +1,13 @@
 export const SCHEMA_VERSION = "chaox-agent/v1";
 
-export type AgentAppID = "sx" | "bx" | "gx";
+export type AgentAppID = "sx" | "bx" | "gx" | "csteix";
 export type PermissionTier = "disabled" | "readOnly" | "appendOnly" | "readWrite";
 export type PermissionAction = "create" | "update" | "delete";
 
 export type BxDomain = "sleep" | "workouts" | "food" | "skin" | "toilet";
 export type SxDomain = "projects" | "expenses" | "incomes" | "tags" | "slogans" | "credentials";
+export type CsteixDomain = "wuxu" | "dwell" | "meditation" | "marks" | "places";
+export type CsteixDimension = "chaos" | "spacetime" | "existence" | "ix";
 
 export type BxMealType = "breakfast" | "lunch" | "dinner" | "snack";
 export type BxSkinProduct = "sunscreen" | "moisturizer" | "bodyLotion" | "medicine" | "other";
@@ -383,6 +385,113 @@ export interface BxExerciseInfo {
   equipment: string[];
   primaryMuscles?: string[];
   secondaryMuscles?: string[];
+}
+
+export interface CsteixWuxuArticle {
+  id: string;
+  slug: string;
+  title: string;
+  titleEn?: string | null;
+  dimensions: CsteixDimension[];
+  writtenAt: string;
+  timezone: string;
+  bodyZh: string;
+  bodyEn?: string | null;
+  rawNotes?: string | null;
+  revision: number;
+  deletedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CsteixWuxuSummaryItem {
+  id: string;
+  slug: string;
+  title: string;
+  titleEn?: string | null;
+  dimensions: CsteixDimension[];
+  writtenAt: string;
+  localDate: string;
+  timezone: string;
+  hasEnglish: boolean;
+  hasRawNotes: boolean;
+  headings: string[];
+  headingsEn?: string[];
+  leavingLines: string[];
+  revision: number;
+  deletedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  bodyZh?: string;
+  bodyEn?: string | null;
+  rawNotes?: string | null;
+}
+
+export interface CsteixWuxuImportItem {
+  slug: string;
+  title: string;
+  titleEn?: string | null;
+  dimensions: string[];
+  writtenAt: string;
+  timezone?: string;
+  bodyZh: string;
+  bodyEn?: string | null;
+  rawNotes?: string | null;
+}
+
+export interface CsteixDwellRecord {
+  id?: string;
+  day?: string;
+  dayKey?: string;
+  date?: string;
+  startedAt?: string;
+  endedAt?: string;
+  recordedAt?: string;
+  pillar?: string;
+  dimension?: string;
+  page?: string;
+  durationSeconds?: number;
+  seconds?: number;
+  durationMinutes?: number;
+  totals?: Record<string, number>;
+  byPillar?: Record<string, number>;
+  [key: string]: unknown;
+}
+
+export interface CsteixMeditationRecord {
+  id?: string;
+  day?: string;
+  dayKey?: string;
+  date?: string;
+  startedAt?: string;
+  endedAt?: string;
+  recordedAt?: string;
+  pillar?: string;
+  dimension?: string;
+  page?: string;
+  durationSeconds?: number;
+  seconds?: number;
+  durationMinutes?: number;
+  totals?: Record<string, number>;
+  byPillar?: Record<string, number>;
+  [key: string]: unknown;
+}
+
+export interface CsteixMarkRecord {
+  id?: string;
+  day?: string;
+  dayKey?: string;
+  date?: string;
+  occurredAt?: string;
+  recordedAt?: string;
+  createdAt?: string;
+  kind?: string;
+  mark?: string;
+  pillar?: string;
+  dimension?: string;
+  page?: string;
+  count?: number;
+  [key: string]: unknown;
 }
 
 export interface SnapshotUploadBody {
