@@ -12,7 +12,20 @@ export class HttpError extends Error {
   }
 }
 
-type AuthRole = "full" | "sync" | "mcp" | "mcp_readonly";
+export type AuthRole = "full" | "sync" | "mcp" | "mcp_readonly";
+
+export const MAX_MCP_BODY_BYTES = 2 * 1024 * 1024; // 2 MiB for /mcp and /preferences
+export const MAX_SYNC_BODY_BYTES = 20 * 1024 * 1024; // 20 MiB default for /sync/* payloads
+
+function resolveMaxSyncBodyBytes(raw: string | undefined): number {
+  const trimmed = raw?.trim();
+  if (!trimmed) return MAX_SYNC_BODY_BYTES;
+  const parsed = Number(trimmed);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return MAX_SYNC_BODY_BYTES;
+  }
+  return parsed;
+}
 
 const SECURITY_HEADERS: Record<string, string> = {
   "Cache-Control": "no-store",
@@ -22,13 +35,72 @@ const SECURITY_HEADERS: Record<string, string> = {
 };
 
 const BASE_CORS_HEADERS: Record<string, string> = {
-  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+  "Access-Control-Allow-Methods": "GET, HEAD, POST, PUT, DELETE, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization, Mcp-Session-Id, Mcp-Protocol-Version, Accept, Last-Event-ID",
   "Access-Control-Expose-Headers": "Mcp-Session-Id, Mcp-Protocol-Version"
 };
 
 const TEXT_ENCODER = new TextEncoder();
+const TEXT_DECODER = new TextDecoder();
 const TOKEN_DIGEST_CACHE = new Map<string, Uint8Array>();
+
+export async function readJsonBody(request: Request, maxBytes: number): Promise<unknown> {
+  const contentLengthRaw = request.headers.get("Content-Length")?.trim();
+  if (contentLengthRaw) {
+    const declared = Number(contentLengthRaw);
+    if (Number.isFinite(declared) && declared > maxBytes) {
+      throw new HttpError(413, `Request body exceeds maximum size of ${maxBytes} bytes.`);
+    }
+  }
+
+  let rawText: string;
+  if (request.body) {
+    const reader = request.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let totalBytes = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value || value.byteLength === 0) continue;
+        totalBytes += value.byteLength;
+        if (totalBytes > maxBytes) {
+          await reader.cancel().catch(() => {});
+          throw new HttpError(413, `Request body exceeds maximum size of ${maxBytes} bytes.`);
+        }
+        chunks.push(value);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    const combined = new Uint8Array(totalBytes);
+    let offset = 0;
+    for (const chunk of chunks) {
+      combined.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    rawText = TEXT_DECODER.decode(combined);
+  } else {
+    rawText = await request.text();
+    if (TEXT_ENCODER.encode(rawText).byteLength > maxBytes) {
+      throw new HttpError(413, `Request body exceeds maximum size of ${maxBytes} bytes.`);
+    }
+  }
+
+  return JSON.parse(rawText);
+}
+
+async function readJsonObject(
+  request: Request,
+  maxBytes: number,
+  errorMessage = "Expected a JSON object request body."
+): Promise<Record<string, unknown>> {
+  const parsed = await readJsonBody(request, maxBytes);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new HttpError(400, errorMessage);
+  }
+  return parsed as Record<string, unknown>;
+}
 
 async function digestSha256(value: string): Promise<Uint8Array> {
   const buf = await crypto.subtle.digest("SHA-256", TEXT_ENCODER.encode(value));
@@ -64,7 +136,7 @@ export function isInternalError(error: unknown): boolean {
   if (typeof code === "string" && (code.startsWith("ERR_SQLITE") || code.startsWith("SQLITE"))) {
     return true;
   }
-  if (/SQLITE_|D1_ERROR|database is locked|no such table/i.test(error.message)) {
+  if (/SQLITE_|D1_[A-Z_]+|database is locked|no such (?:table|column)/i.test(error.message)) {
     return true;
   }
   return false;
@@ -151,7 +223,7 @@ function jsonResponse(
   );
 }
 
-async function authenticateRequest(headerValue: string | null, env: ServerEnv): Promise<AuthRole | null> {
+export async function authenticateRequest(headerValue: string | null, env: ServerEnv): Promise<AuthRole | null> {
   const rawCandidates: Array<{ role: AuthRole; token: string }> = [
     { role: "full", token: env.CHAOX_AUTH_TOKEN?.trim() ?? "" },
     { role: "sync", token: env.CHAOX_SYNC_TOKEN?.trim() ?? "" },
@@ -199,7 +271,16 @@ export async function handleRequest(request: Request, env: ServerEnv): Promise<R
   const serverName = env.SERVER_NAME?.trim() || "chaox-agent-server";
 
   const url = new URL(request.url);
-  if (url.pathname === "/health" && request.method === "GET") {
+  if (url.pathname === "/health" && (request.method === "GET" || request.method === "HEAD")) {
+    if (request.method === "HEAD") {
+      return withResponseHeaders(
+        new Response(null, {
+          status: 200,
+          headers: { "Content-Type": "application/json; charset=utf-8" }
+        }),
+        cors.headers
+      );
+    }
     return jsonResponse(
       {
         status: "ok",
@@ -227,6 +308,8 @@ export async function handleRequest(request: Request, env: ServerEnv): Promise<R
 
   const rawAllowPrefsWrite = env.CHAOX_ALLOW_MCP_PREFERENCES_WRITE?.trim().toLowerCase() ?? "";
   const allowMcpPreferencesWrite = rawAllowPrefsWrite !== "0" && rawAllowPrefsWrite !== "false";
+  const syncMaxBodyBytes = resolveMaxSyncBodyBytes(env.CHAOX_MAX_BODY_BYTES);
+  const mcpMaxBodyBytes = Math.min(syncMaxBodyBytes, MAX_MCP_BODY_BYTES);
 
   const store = new ExchangeStore(env.DB, {
     backendMode,
@@ -241,7 +324,8 @@ export async function handleRequest(request: Request, env: ServerEnv): Promise<R
       return withResponseHeaders(
         await handleMcpRequest(request, store, {
           forceReadOnly: authRole === "mcp_readonly",
-          allowPreferencesWrite: allowMcpPreferencesWrite
+          allowPreferencesWrite: allowMcpPreferencesWrite,
+          maxBodyBytes: mcpMaxBodyBytes
         }),
         cors.headers
       );
@@ -259,7 +343,11 @@ export async function handleRequest(request: Request, env: ServerEnv): Promise<R
             cors.headers
           );
         }
-        const body = (await request.json()) as { content?: string };
+        const body = await readJsonObject(
+          request,
+          mcpMaxBodyBytes,
+          "Expected JSON object with 'content' string."
+        );
         if (typeof body.content !== "string") {
           return jsonResponse({ error: "Expected JSON object with 'content' string." }, 400, cors.headers);
         }
@@ -287,7 +375,11 @@ export async function handleRequest(request: Request, env: ServerEnv): Promise<R
 
     if (url.pathname === "/sync/csteix/wuxu/import") {
       if (request.method === "POST") {
-        const body = (await request.json()) as { articles?: unknown };
+        const body = await readJsonObject(
+          request,
+          syncMaxBodyBytes,
+          "Expected JSON object with 'articles' array."
+        );
         return jsonResponse(await store.csteix.importWuxuArticles(body.articles), 200, cors.headers);
       }
       return jsonResponse({ error: "Method not allowed" }, 405, cors.headers);
@@ -318,15 +410,19 @@ export async function handleRequest(request: Request, env: ServerEnv): Promise<R
       }
 
       if (action === "ack" && request.method === "POST") {
-        const body = (await request.json()) as { receipts?: Receipt[] };
+        const body = await readJsonObject(
+          request,
+          syncMaxBodyBytes,
+          "Expected JSON object with 'receipts' array."
+        );
         if (!Array.isArray(body.receipts)) {
           return jsonResponse({ error: "Expected JSON object with 'receipts' array." }, 400, cors.headers);
         }
-        return jsonResponse(await store.ackAppReceipts(app, body.receipts), 200, cors.headers);
+        return jsonResponse(await store.ackAppReceipts(app, body.receipts as Receipt[]), 200, cors.headers);
       }
 
       if (action === "snapshot" && request.method === "PUT") {
-        const body = (await request.json()) as SnapshotUploadBody;
+        const body = (await readJsonObject(request, syncMaxBodyBytes)) as unknown as SnapshotUploadBody;
         return jsonResponse(await store.putAppSnapshot(app, body), 200, cors.headers);
       }
 
@@ -338,10 +434,13 @@ export async function handleRequest(request: Request, env: ServerEnv): Promise<R
     }
 
     const datasetMatch = /^\/sync\/([a-z]+)\/dataset\/([a-zA-Z0-9_-]+)$/.exec(url.pathname);
-    if (datasetMatch && request.method === "PUT") {
+    if (datasetMatch) {
       const app = ExchangeStore.parseAppId(datasetMatch[1]);
+      if (request.method !== "PUT") {
+        return jsonResponse({ error: "Method not allowed" }, 405, cors.headers);
+      }
       const domain = datasetMatch[2];
-      const body = (await request.json()) as { data?: unknown | null };
+      const body = await readJsonObject(request, syncMaxBodyBytes);
       return jsonResponse(await store.putAppDatasetDomain(app, domain, body.data ?? null), 200, cors.headers);
     }
 

@@ -33,7 +33,7 @@ async function makeTempExchangeDir(): Promise<string> {
         },
         bx: {
           app: "bx",
-          bundleId: "com.lizhichao.bx",
+          bundleId: "ai.chaox.bx",
           appVersion: "1.0",
           permission: "appendOnly",
           capabilities: ["catalog", "summary", "record_food", "record_skin", "record_toilet"],

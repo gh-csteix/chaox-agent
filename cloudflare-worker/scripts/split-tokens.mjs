@@ -8,14 +8,18 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const workerRoot = path.resolve(__dirname, "..");
 const localTomlPath = path.join(workerRoot, "wrangler.local.toml");
+const localWranglerBin = path.join(workerRoot, "node_modules", "wrangler", "bin", "wrangler.js");
 
 function parseArgs(argv) {
   let urlArg = null;
   let dryRun = false;
+  let help = false;
   for (let idx = 0; idx < argv.length; idx += 1) {
     const arg = argv[idx];
     if (arg === "--dry-run") {
       dryRun = true;
+    } else if (arg === "--help" || arg === "-h") {
+      help = true;
     } else if (arg === "--url" && idx + 1 < argv.length) {
       urlArg = argv[idx + 1];
       idx += 1;
@@ -23,7 +27,7 @@ function parseArgs(argv) {
       urlArg = arg;
     }
   }
-  return { dryRun, url: urlArg };
+  return { dryRun, help, url: urlArg };
 }
 
 function normalizeBaseUrl(raw) {
@@ -37,25 +41,62 @@ function normalizeBaseUrl(raw) {
 function inferUrlFromWranglerConfig() {
   if (!existsSync(localTomlPath)) return null;
   const raw = readFileSync(localTomlPath, "utf8");
-  const patternMatch = /pattern\s*=\s*"([^"]+)"/.exec(raw);
+  const patternMatch = /pattern\s*=\s*["']([^"']+)["']/.exec(raw);
   if (!patternMatch) return null;
   return normalizeBaseUrl(patternMatch[1]);
 }
 
-function runCommand(cmd, args, options = {}) {
+function runWrangler(wranglerArgs, options = {}) {
+  const useLocalBin = existsSync(localWranglerBin);
+  const cmd = useLocalBin
+    ? process.execPath
+    : process.platform === "win32"
+      ? "npx.cmd"
+      : "npx";
+  const args = useLocalBin ? [localWranglerBin, ...wranglerArgs] : ["wrangler", ...wranglerArgs];
+  const env = { ...process.env, ...options.env };
+  if (options.ci === false) {
+    delete env.CI;
+  } else {
+    env.CI = "true";
+  }
+
   return spawnSync(cmd, args, {
     cwd: workerRoot,
     encoding: "utf8",
     stdio: ["pipe", "pipe", "pipe"],
-    env: { ...process.env, CI: "true", ...options.env },
+    shell: !useLocalBin && process.platform === "win32",
+    env,
     input: options.input
   });
 }
 
+function detectWranglerHint(output) {
+  if (/more than one account|multiple accounts|select an account|CLOUDFLARE_ACCOUNT_ID/i.test(output)) {
+    return (
+      "Hint: Your Cloudflare login has access to multiple accounts.\n" +
+      "  1. Run 'npx wrangler whoami' to find the Account ID you want to use.\n" +
+      "  2. Re-run: CLOUDFLARE_ACCOUNT_ID=<account-id> npm run split-tokens"
+    );
+  }
+  return "";
+}
+
 function requireSuccess(result, description) {
-  if (result.status !== 0) {
-    const details = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
-    throw new Error(`${description} failed (exit ${result.status ?? "unknown"}):\n${details}`);
+  if (result.error || result.status !== 0) {
+    const details = [
+      result.error?.message ? `Spawn error: ${result.error.message}` : "",
+      result.stdout,
+      result.stderr
+    ]
+      .filter(Boolean)
+      .join("\n")
+      .trim();
+    const hint = detectWranglerHint(details);
+    const suffix = hint ? `\n\n${hint}` : "";
+    throw new Error(
+      `${description} failed (exit ${result.status ?? "unknown"}):\n${details || "(no output)"}${suffix}`
+    );
   }
   return result;
 }
@@ -126,6 +167,14 @@ async function verifySplitTokens(baseUrl, syncToken, mcpToken) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (args.help) {
+    console.log(
+      "Usage: npm run split-tokens -- [--url https://<your-worker-url>] [--dry-run]\n" +
+        "Environment (optional): CLOUDFLARE_ACCOUNT_ID, CHAOX_SYNC_TOKEN, CHAOX_MCP_TOKEN"
+    );
+    return;
+  }
+
   const baseUrl = normalizeBaseUrl(args.url) ?? inferUrlFromWranglerConfig();
 
   if (args.dryRun) {
@@ -150,7 +199,10 @@ async function main() {
   }
 
   console.log("1/4 Checking Cloudflare authentication...");
-  const whoami = runCommand("npx", ["wrangler", "whoami"]);
+  const whoami = runWrangler(["whoami"]);
+  if (whoami.error) {
+    requireSuccess(whoami, "wrangler whoami");
+  }
   const combinedWhoami = `${whoami.stdout || ""}\n${whoami.stderr || ""}`;
   if (whoami.status !== 0 || /not authenticated/i.test(combinedWhoami)) {
     throw new Error("Not logged in to Cloudflare. Run `npx wrangler login` first.");
@@ -160,21 +212,20 @@ async function main() {
   console.log("    (Keeping existing CHAOX_AUTH_TOKEN intact for zero-downtime migration.)");
   const syncToken = process.env.CHAOX_SYNC_TOKEN?.trim() || crypto.randomBytes(32).toString("hex");
   const mcpToken = process.env.CHAOX_MCP_TOKEN?.trim() || crypto.randomBytes(32).toString("hex");
+  if (syncToken === mcpToken) {
+    throw new Error("CHAOX_SYNC_TOKEN and CHAOX_MCP_TOKEN must be distinct values.");
+  }
 
   requireSuccess(
-    runCommand(
-      "npx",
-      ["wrangler", "secret", "put", "CHAOX_SYNC_TOKEN", "--config", "wrangler.local.toml"],
-      { input: `${syncToken}\n` }
-    ),
+    runWrangler(["secret", "put", "CHAOX_SYNC_TOKEN", "--config", "wrangler.local.toml"], {
+      input: `${syncToken}\n`
+    }),
     "wrangler secret put CHAOX_SYNC_TOKEN"
   );
   requireSuccess(
-    runCommand(
-      "npx",
-      ["wrangler", "secret", "put", "CHAOX_MCP_TOKEN", "--config", "wrangler.local.toml"],
-      { input: `${mcpToken}\n` }
-    ),
+    runWrangler(["secret", "put", "CHAOX_MCP_TOKEN", "--config", "wrangler.local.toml"], {
+      input: `${mcpToken}\n`
+    }),
     "wrangler secret put CHAOX_MCP_TOKEN"
   );
 

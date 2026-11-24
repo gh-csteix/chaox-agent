@@ -33,6 +33,26 @@ export interface AppDatasetRow {
   updated_at: string;
 }
 
+export interface AppDatasetChunkRow {
+  app: string;
+  domain: string;
+  chunk_index: number;
+  chunk_data: string;
+  updated_at: string;
+}
+
+export const DEFAULT_DATASET_CHUNK_MAX_BYTES = 1_000_000;
+
+export interface ChunkedDatasetManifest {
+  __chaoxDatasetStorage: "chunked_v1";
+  chunkCount: number;
+  byteLength: number;
+}
+
+export type Utf8ChunkResult =
+  | { chunked: false; chunks: [string] }
+  | { chunked: true; chunks: string[]; totalBytes: number };
+
 export interface InboxRow {
   request_id: string;
   app: string;
@@ -137,6 +157,99 @@ export function safeJsonParse<T>(raw: string | null | undefined): T | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Split a string into UTF-8 byte-bounded chunks without ever splitting UTF-16 surrogate pairs.
+ * Designed for transparent storage across SQLite / Cloudflare D1 single-row string limits.
+ */
+export function splitUtf8Chunks(
+  text: string,
+  maxChunkBytes: number = DEFAULT_DATASET_CHUNK_MAX_BYTES
+): Utf8ChunkResult {
+  if (!Number.isInteger(maxChunkBytes) || maxChunkBytes < 4) {
+    throw new Error(`maxChunkBytes must be an integer >= 4 (received ${maxChunkBytes}).`);
+  }
+
+  // Every UTF-16 code unit encodes to at most 3 UTF-8 bytes (surrogate pairs use 2 units -> 4 bytes = 2 B/unit).
+  if (text.length * 3 <= maxChunkBytes) {
+    return { chunked: false, chunks: [text] };
+  }
+
+  const chunks: string[] = [];
+  let chunkStart = 0;
+  let chunkBytes = 0;
+  let totalBytes = 0;
+
+  for (let i = 0; i < text.length; ) {
+    const code = text.charCodeAt(i);
+    let charBytes: number;
+    let step: number;
+
+    if (code <= 0x7f) {
+      charBytes = 1;
+      step = 1;
+    } else if (code <= 0x7ff) {
+      charBytes = 2;
+      step = 1;
+    } else if (code >= 0xd800 && code <= 0xdbff && i + 1 < text.length) {
+      const next = text.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        charBytes = 4;
+        step = 2;
+      } else {
+        charBytes = 3;
+        step = 1;
+      }
+    } else {
+      charBytes = 3;
+      step = 1;
+    }
+
+    if (chunkBytes + charBytes > maxChunkBytes && i > chunkStart) {
+      chunks.push(text.slice(chunkStart, i));
+      chunkStart = i;
+      chunkBytes = 0;
+    }
+
+    chunkBytes += charBytes;
+    totalBytes += charBytes;
+    i += step;
+  }
+
+  if (chunkStart < text.length) {
+    chunks.push(text.slice(chunkStart));
+  }
+
+  if (chunks.length <= 1) {
+    return { chunked: false, chunks: [chunks[0] ?? ""] };
+  }
+  return { chunked: true, chunks, totalBytes };
+}
+
+export function parseChunkedDatasetManifest(raw: string): ChunkedDatasetManifest | null {
+  if (!raw.startsWith("{") || !raw.includes('"__chaoxDatasetStorage"')) {
+    return null;
+  }
+  const parsed = safeJsonParse<Record<string, unknown>>(raw);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return null;
+  }
+  if (parsed.__chaoxDatasetStorage !== "chunked_v1") {
+    return null;
+  }
+  const { chunkCount, byteLength } = parsed;
+  if (typeof chunkCount !== "number" || !Number.isInteger(chunkCount) || chunkCount <= 0) {
+    return null;
+  }
+  if (typeof byteLength !== "number" || !Number.isInteger(byteLength) || byteLength < 0) {
+    return null;
+  }
+  return {
+    __chaoxDatasetStorage: "chunked_v1",
+    chunkCount,
+    byteLength
+  };
 }
 
 const MAX_TZ_CACHE_SIZE = 64;

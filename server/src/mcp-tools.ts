@@ -26,6 +26,40 @@ const RAW_SET_SCHEMA = {
   }
 };
 
+const WUXU_COUPLETS_SCHEMA = {
+  type: "array",
+  maxItems: 4,
+  description:
+    "Optional bilingual symmetric Stage Couplets (default [] / 0; distill at most 1-2 ONLY when the article holds timeless aphorisms worthy of the meditation stage — never force onto routine logs; max 4). Read chaox://guide/wuxu-couplets first. Each couplet carries its own 'dimension' ('chaos'|'spacetime'|'existence'|'ix'), 'zh' ('LEFT|RIGHT', 2-6 chars per half, exact equal length, zero spaces/punctuation/markdown/emoji), and 'en' ('LEFT|RIGHT', uppercase ASCII + single spaces only, 6-17 chars per rendered half after PivotText space removal and longer-half adjacent-letter dedupe, length diff <= 3, aim <= 2). CRITICAL: When zh includes '我求', en MUST use 'IX' (never SEEKING/EXPLORE).",
+  items: {
+    type: "object",
+    required: ["dimension", "zh", "en"],
+    properties: {
+      id: {
+        type: "string",
+        description: "Optional stable couplet ID (preserved when non-empty; otherwise reused on matching (dimension, zh) or generated)."
+      },
+      dimension: {
+        type: "string",
+        enum: ["chaos", "spacetime", "existence", "ix"],
+        description: "Dimension this couplet belongs to ('chaos', 'spacetime', 'existence', or 'ix')."
+      },
+      zh: {
+        type: "string",
+        description: "Symmetric Chinese couplet 'LEFT|RIGHT' (2-6 chars per side, equal char count, zero whitespace/punctuation/markdown/emoji)."
+      },
+      en: {
+        type: "string",
+        description: "Symmetric English couplet 'LEFT|RIGHT' (uppercase ASCII + single spaces, 6-17 rendered chars per half, diff <= 3, aim <= 2; 我求 -> IX)."
+      },
+      sourceLine: {
+        type: ["string", "null"],
+        description: "Optional verbatim line from rawNotes or body that inspired this couplet."
+      }
+    }
+  }
+};
+
 export interface McpToolAnnotations {
   readOnlyHint?: boolean;
   destructiveHint?: boolean;
@@ -271,7 +305,7 @@ const RAW_TOOL_DEFINITIONS: McpToolDefinition[] = [
     name: "sx_record_expense",
     title: "Record SX Expense",
     description:
-      "Queue a new expense creation in Spending X. Call sx_get_catalog first. IMPORTANT: SX stores expenses with calendar-date + 24-hour local hour (00-23) precision, displayed in the app as 'YYYY-MM-DD-HH' (e.g. '2026-11-22-12' = 12:00 noon, '2026-11-21-00' = midnight/hour unknown — the trailing 2 digits are the HOUR, NEVER minutes or a sequence number).",
+      "Queue a new expense creation in Spending X. Call sx_get_catalog first. IMPORTANT: SX stores expenses with calendar-date + 24-hour local hour (00-23) precision, displayed in the app as 'YYYY-MM-DD-HH' (e.g. '2026-11-22-12' = 12:00 noon, '2026-11-21-00' = midnight/hour unknown — the trailing 2 digits are the HOUR, NEVER minutes or a sequence number). CREDENTIAL BINDING RULE: When SX 'credentials' scope is enabled and 'credentialId' is omitted, the server auto-binds if the project has exactly 1 linked credential; returns queued=false, credentialSelectionRequired=true, and credentialCandidates if multiple credentials are linked so you MUST ask the user to choose and retry with credentialId (or skipCredential=true to leave unbound); and leaves unbound if 0 credentials are linked. NEVER create a new credential without explicit user request. The response always includes the actually bound credentialId (or null).",
     inputSchema: {
       type: "object",
       required: ["amount", "projectName"],
@@ -292,7 +326,12 @@ const RAW_TOOL_DEFINITIONS: McpToolDefinition[] = [
           type: "integer",
           minimum: 1,
           description:
-            "Optional linked non-secret credential ID from sx_list_credentials (requires user opt-in to SX 'credentials' scope)"
+            "Optional linked non-secret credential ID from sx_list_credentials (requires user opt-in to SX 'credentials' scope and must be actively linked to projectName). Omit to use server default resolution: auto-binds when the project has 1 linked credential, prompts for user selection when multiple exist, or leaves unbound when 0 exist. Never create a credential automatically."
+        },
+        skipCredential: {
+          type: "boolean",
+          description:
+            "Set true to explicitly leave this expense without a bound credential (bypasses auto-bind when 1 linked credential exists and bypasses the selection prompt when multiple exist). Cannot be combined with credentialId."
         },
         currency: {
           type: "string",
@@ -456,7 +495,7 @@ const RAW_TOOL_DEFINITIONS: McpToolDefinition[] = [
     name: "sx_record_income",
     title: "Record SX Income",
     description:
-      "Queue an income creation in Spending X. Call sx_get_catalog first so projectName matches an active project with supportsIncome=true. Incomes display at calendar-day precision ('YYYY-MM-DD').",
+      "Queue an income creation in Spending X. Call sx_get_catalog first so projectName matches an active project with supportsIncome=true. Incomes display at calendar-day precision ('YYYY-MM-DD'). CREDENTIAL BINDING RULE: When SX 'credentials' scope is enabled and 'credentialId' is omitted, the server auto-binds if the project has exactly 1 linked credential; returns queued=false, credentialSelectionRequired=true, and credentialCandidates if multiple credentials are linked so you MUST ask the user to choose and retry with credentialId (or skipCredential=true to leave unbound); and leaves unbound if 0 credentials are linked. NEVER create a new credential without explicit user request. The response always includes the actually bound credentialId (or null).",
     inputSchema: {
       type: "object",
       required: ["amount", "projectName"],
@@ -470,7 +509,13 @@ const RAW_TOOL_DEFINITIONS: McpToolDefinition[] = [
         credentialId: {
           type: "integer",
           minimum: 1,
-          description: "Optional linked credential ID from sx_list_credentials (requires SX 'credentials' scope opt-in)"
+          description:
+            "Optional linked credential ID from sx_list_credentials (requires SX 'credentials' scope opt-in and must be actively linked to projectName). Omit to use server default resolution: auto-binds when 1 linked credential exists, prompts for user selection when multiple exist, or leaves unbound when 0 exist. Never create a credential automatically."
+        },
+        skipCredential: {
+          type: "boolean",
+          description:
+            "Set true to explicitly leave this income without a bound credential (bypasses auto-bind when 1 linked credential exists and bypasses the selection prompt when multiple exist). Cannot be combined with credentialId."
         },
         currency: {
           type: "string",
@@ -806,7 +851,7 @@ const RAW_TOOL_DEFINITIONS: McpToolDefinition[] = [
     name: "sx_create_credential",
     title: "Create SX Credential Metadata",
     description:
-      "Create a non-secret Spending X credential entry (and optionally link it to a project). Does not set passwords, TOTP, recovery codes, or private notes.",
+      "Create a non-secret Spending X credential entry (and optionally link it to a project). Does not set passwords, TOTP, recovery codes, or private notes. Only create a credential when the user explicitly asks to add one — never auto-create credentials while recording expenses or incomes.",
     inputSchema: {
       type: "object",
       required: ["username"],
@@ -1401,7 +1446,7 @@ const RAW_TOOL_DEFINITIONS: McpToolDefinition[] = [
     name: "csteix_list_wuxu",
     title: "List CSTEIX Wuxu Articles",
     description:
-      "Search and list private daily Wuxu articles across title, English title, Chinese/English bodies, and raw notes. Returns metadata, section headings, and leaving lines without full bodies unless includeBody is true.",
+      "Search and list private daily Wuxu articles across title, English title, Chinese/English bodies, raw notes, and stage couplets. Returns metadata, section headings, leaving lines, and couplets without full bodies unless includeBody is true.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: "object",
@@ -1413,9 +1458,13 @@ const RAW_TOOL_DEFINITIONS: McpToolDefinition[] = [
           enum: ["chaos", "spacetime", "existence", "ix"],
           description: "Filter by CSTEIX dimension"
         },
-        query: { type: "string", description: "Substring search across title, titleEn, bodyZh, bodyEn, and rawNotes" },
+        query: {
+          type: "string",
+          description: "Substring search across title, titleEn, bodyZh, bodyEn, rawNotes, and couplets"
+        },
         hasRaw: { type: "boolean", description: "Filter by whether rawNotes is present" },
         hasEn: { type: "boolean", description: "Filter by whether bodyEn is present" },
+        hasCouplets: { type: "boolean", description: "Filter by whether stage couplets are present" },
         includeDeleted: { type: "boolean", description: "Include soft-deleted articles in 30-day Trash (default false)" },
         includeBody: { type: "boolean", description: "Include full bodyZh/bodyEn/rawNotes in list response (default false)" },
         limit: { type: "integer", minimum: 1, maximum: 200 },
@@ -1427,7 +1476,7 @@ const RAW_TOOL_DEFINITIONS: McpToolDefinition[] = [
     name: "csteix_get_wuxu",
     title: "Get CSTEIX Wuxu Article",
     description:
-      "Read a single Wuxu article in full (bodyZh, bodyEn, rawNotes, headings, leavingLines, revision) by UUID id or slug.",
+      "Read a single Wuxu article in full (bodyZh, bodyEn, rawNotes, couplets, headings, leavingLines, revision) by UUID id or slug.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: "object",
@@ -1441,7 +1490,7 @@ const RAW_TOOL_DEFINITIONS: McpToolDefinition[] = [
     name: "csteix_create_wuxu",
     title: "Create CSTEIX Wuxu Article",
     description:
-      "Create a new private Wuxu article immediately in the server database and emit an applied receipt. Requires a unique lowercase kebab-case slug, at least one dimension (chaos/spacetime/existence/ix), and bodyZh.",
+      "Create a new private Wuxu article immediately in the server database and emit an applied receipt. Requires a unique lowercase kebab-case slug, at least one dimension (chaos/spacetime/existence/ix), and bodyZh. Optionally include 0-2 symmetric Stage Couplets (max 4, default []; read chaox://guide/wuxu-couplets).",
     inputSchema: {
       type: "object",
       required: ["slug", "title", "dimensions", "bodyZh"],
@@ -1463,6 +1512,7 @@ const RAW_TOOL_DEFINITIONS: McpToolDefinition[] = [
         bodyZh: { type: "string", minLength: 1, description: "Primary Chinese Markdown body without the # Title/header skeleton" },
         bodyEn: { type: "string", description: "Optional English Markdown body" },
         rawNotes: { type: "string", description: "Optional verbatim user raw notes/utterances" },
+        couplets: WUXU_COUPLETS_SCHEMA,
         requestId: { type: "string" },
         client: { type: "string" }
       }
@@ -1472,7 +1522,7 @@ const RAW_TOOL_DEFINITIONS: McpToolDefinition[] = [
     name: "csteix_update_wuxu",
     title: "Update CSTEIX Wuxu Article",
     description:
-      "Update an existing Wuxu article immediately in the server database, incrementing revision and recording an applied receipt. Supports expectedRevision optimistic locking and appendBodyZh/appendBodyEn/appendRawNotes for same-day multi-pass writing.",
+      "Update an existing Wuxu article immediately in the server database, incrementing revision and recording an applied receipt. Supports expectedRevision optimistic locking, appendBodyZh/appendBodyEn/appendRawNotes for same-day multi-pass writing, and couplets (replace; [] clears) or appendCouplets (dedupe by normalized zh; max 4).",
     inputSchema: {
       type: "object",
       properties: {
@@ -1498,6 +1548,17 @@ const RAW_TOOL_DEFINITIONS: McpToolDefinition[] = [
         appendBodyZh: { type: "string", description: "Append Markdown paragraph/section to bodyZh" },
         appendBodyEn: { type: "string", description: "Append Markdown paragraph/section to bodyEn" },
         appendRawNotes: { type: "string", description: "Append verbatim utterances to rawNotes" },
+        couplets: {
+          ...WUXU_COUPLETS_SCHEMA,
+          description:
+            `Replace the entire stage couplets array (pass [] to clear all couplets; cannot combine with appendCouplets). ${WUXU_COUPLETS_SCHEMA.description}`
+        },
+        appendCouplets: {
+          ...WUXU_COUPLETS_SCHEMA,
+          minItems: 1,
+          description:
+            `Append stage couplets onto the article, deduplicating by normalized zh (updates fields while preserving id when same zh exists; combined total <= 4; cannot combine with couplets). ${WUXU_COUPLETS_SCHEMA.description}`
+        },
         requestId: { type: "string" },
         client: { type: "string" }
       }

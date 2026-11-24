@@ -12,3 +12,4 @@ data/
 *.sqlite-shm
 wrangler.local.toml
 .wrangler/
+Caddyfile

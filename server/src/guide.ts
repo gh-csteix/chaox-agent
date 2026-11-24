@@ -6,9 +6,9 @@ export const MCP_SERVER_INSTRUCTIONS =
   "SX expenses have calendar-date + 24-hour local hour (00-23) precision, displayed in the SX app as YYYY-MM-DD-HH where the trailing two digits are the 24-hour local hour in timeZoneIdentifier (e.g. 2026-11-22-12 = 12:00 noon, 2026-11-21-00 = midnight/hour unknown — NEVER minutes or a sequence number). Pass ISO-8601 with offset ('2026-11-22T12:00:00+08:00'), 'YYYY-MM-DD-HH', or 'YYYY-MM-DD' + hour (0..23); bare YYYY-MM-DD without hour defaults to local 00:00. " +
   "In SX, projectName must match an existing reusable project/category bucket (put merchant/dish/item details in 'note'); omit 'tags' on create to inherit the project's latest tags or pass [] to clear tags. " +
   "sx_update_expense and sx_update_income apply partial patches in strict FIFO order on device, and also support editing/cancelling queued creates via pendingRequestId. " +
-  "Credential Vault secrets (passwords, TOTP secrets, recovery codes, notes) NEVER leave the device; non-secret credential metadata and links are opt-in under 'credentials'. All SX deletions move items to 30-day Trash. " +
+  "Credential Vault secrets (passwords, TOTP secrets, recovery codes, notes) NEVER leave the device; non-secret credential metadata and links are opt-in under 'credentials'. When 'credentials' scope is enabled for SX expenses/incomes, omitting 'credentialId' auto-binds if the project has 1 linked credential, pauses (queued=false, credentialSelectionRequired=true, credentialCandidates) if multiple exist so you MUST ask the user to choose (or pass skipCredential=true to leave unbound), and leaves unbound if 0 exist — never auto-create credentials; responses always include the bound credentialId (or null). All SX deletions move items to 30-day Trash. " +
   "In BX, Apple Health sleep nights and workout frames/duration/HR/energy are strictly read-only, while food, topical medicine/skincare, toilet logs, and workout exercise/set annotations support full CRUD when enabled; BX recordedAt accepts ISO-8601 with offset, local 'YYYY-MM-DD HH:mm', or 'YYYY-MM-DD' in BX timezone. " +
-  "In CSTEIX, dwell, meditation, marks, and opt-in places (off by default) are strictly read-only snapshots from the iOS app. Private daily Wuxu articles ('wuxu') execute CRUD immediately against the server database with optimistic expectedRevision locking, 30-day soft-delete Trash + restore, and immediate 'applied' receipts (also readable via chaox://wuxu/{slug}). " +
+  "In CSTEIX, dwell, meditation, marks, and opt-in places (off by default) are strictly read-only snapshots from the iOS app. Private daily Wuxu articles ('wuxu') execute CRUD immediately against the server database with optimistic expectedRevision locking, 30-day soft-delete Trash + restore, and immediate 'applied' receipts (also readable via chaox://wuxu/{slug}). Wuxu articles optionally carry 0-2 (max 4, default []) bilingual symmetric Stage Couplets ('couplets'/'appendCouplets'); read chaox://guide/wuxu-couplets before authoring couplets. " +
   "SX and BX writes enqueue into the server inbox until the user's iPhone syncs.";
 
 export const SKILL_GUIDE_MARKDOWN = `# CHAOX Agent Skill
@@ -34,7 +34,7 @@ Use these MCP tools to read, create, update, and delete permitted records for **
 - **List before updating/deleting**: Call \`sx_list_expenses\` / \`sx_list_projects\` / \`sx_list_credentials\` / \`bx_list_food\` / \`bx_list_workouts\` / \`bx_list_skin\` / \`bx_list_toilet\` / \`csteix_list_wuxu\` to obtain exact record IDs, slugs, or revisions.
 - **Workouts & Equipment**: Call \`bx_list_exercises\` to match exercises by key, Chinese/English title, or equipment before calling \`bx_add_workout_exercise\` or \`bx_update_workout_exercise\`.
 - **Meal Photo + Cost**: Call \`sx_record_expense\` and \`bx_record_food\` with a shared \`requestId\` prefix, estimating kcal transparently when not stated. BX \`recordedAt\` accepts ISO-8601 with offset, local \`YYYY-MM-DD HH:mm\`, or \`YYYY-MM-DD\` (local noon in BX timezone).
-- **Daily Wuxu Writing**: Search existing articles with \`csteix_list_wuxu\` (searches titles, bodies, and \`rawNotes\`). Read full Markdown via \`csteix_get_wuxu\` or MCP resource \`chaox://wuxu/{slug}\`. For a new piece call \`csteix_create_wuxu\` with pure body Markdown (without the \`# Title\` header block) and verbatim user quotes in \`rawNotes\`; for same-day continuations call \`csteix_update_wuxu\` with \`expectedRevision\` and \`appendBodyZh\` / \`appendRawNotes\`.
+- **Daily Wuxu Writing**: Search existing articles with \`csteix_list_wuxu\` (searches titles, bodies, \`rawNotes\`, and \`couplets\`). Read full Markdown via \`csteix_get_wuxu\` or MCP resource \`chaox://wuxu/{slug}\`. For a new piece call \`csteix_create_wuxu\` with pure body Markdown (without the \`# Title\` header block) and verbatim user quotes in \`rawNotes\`; for same-day continuations call \`csteix_update_wuxu\` with \`expectedRevision\` and \`appendBodyZh\` / \`appendRawNotes\`. Optionally distill \`0–2\` (default \`[]\`, hard cap \`4\`) bilingual symmetric Stage Couplets (\`couplets\` / \`appendCouplets\`) only when the piece carries timeless aphorisms worthy of the meditation stage — read \`chaox://guide/wuxu-couplets\` first for PivotText symmetry math and CSTEIX terminology (\`我求\` = \`IX\`).
 
 ## SX Expense & Income Field Reference
 
@@ -51,7 +51,8 @@ Both tools validate immediately, and \`sx_update_expense\` applies **partial pat
 | \`hour\` | Optional integer \`0\`–\`23\`: local 24-hour clock hour in \`timeZoneIdentifier\`. Sets/overrides the trailing \`-HH\`. On create without \`date\`, applies to today; on update without \`date\`, preserves the expense's existing \`localDate\`. |
 | \`tags\` | **Critical**: omit on create to inherit the project's latest record tags (\`recentExpenseTags\`); pass \`[]\` to clear all tags; pass \`["Lunch"]\` to set exact tags (on update, omitting keeps existing tags). |
 | \`note\` | Free-text memo shown as one line on SX cards (put merchant, items, or route first). Write tools use singular \`note\` (server also tolerates \`notes\`); read tools return plural \`notes\`. |
-| \`credentialId\` | Optional integer ID of a linked credential (\`credentials\` scope must be enabled in SX). On \`sx_update_expense\`, use \`clearCredential: true\` to detach. |
+| \`credentialId\` | Optional integer ID of a linked credential (\`credentials\` scope must be enabled in SX). When omitted with \`credentials\` enabled, \`sx_record_expense\` / \`sx_record_income\` auto-bind if the project has 1 linked credential, return \`queued: false\` + \`credentialSelectionRequired: true\` + \`credentialCandidates\` when multiple exist (ask the user to choose, or pass \`skipCredential: true\`), and leave unbound if 0 exist. Never auto-create credentials. Responses return the bound \`credentialId\` (or \`null\`). On \`sx_update_expense\`, use \`clearCredential: true\` to detach. |
+| \`skipCredential\` | Optional boolean for \`sx_record_expense\` / \`sx_record_income\`: set \`true\` to explicitly leave unbound (skips 1-credential auto-bind and multi-credential selection prompt). Cannot combine with \`credentialId\`. |
 | \`requestId\` | Optional idempotency key so retries never create duplicate records. |
 | \`client\` | Optional short calling AI assistant identifier for audit metadata. |
 
@@ -68,6 +69,83 @@ Both tools validate immediately, and \`sx_update_expense\` applies **partial pat
 export const DEFAULT_PREFERENCES_MARKDOWN = `# Personal CHAOX Assistant Preferences
 
 No custom preferences saved yet. Call chaox_update_preferences (or PUT /preferences) with your routing rules (for example, default meal project name, currency, or workout set conventions) so every AI client follows them automatically.
+`;
+
+export const WUXU_COUPLETS_GUIDE_MARKDOWN = `# CSTEIX Wuxu Stage Couplets Guide
+
+Stage Couplets (\`couplets\`) are optional bilingual aphorism pairs distilled from a private Wuxu article and shown centered around the ink origin on the CSTEIX meditation stage.
+
+## 1. Selectivity: 0 by Default, 1-2 Maximum When Earned
+
+- **Default to \`[]\` (0 couplets).** Most daily journals, passing observations, factual logs, and raw emotional notes need zero couplets.
+- **Distill 1-2 couplets ONLY** when the article holds a timeless, condensed insight worthy of standing alone on the CSTEIX meditation stage. Never force a couplet onto routine entries.
+- **Server hard limit**: at most **4** couplets per article.
+
+## 2. Per-Couplet Dimension
+
+Each couplet carries its own \`dimension\` (\`"chaos"\`, \`"spacetime"\`, \`"existence"\`, or \`"ix"\`), chosen for that aphorism's own scale:
+
+- \`chaos\`: ground everything rises from, emergence, entropy, perpetual becoming
+- \`spacetime\`: vessel things unfold in, wild cosmos, void holding, time flowing
+- \`existence\`: standing point, fit body carrying Dao, steady mind, weight of presence
+- \`ix\`: narrative agency, negative space, distilling joy, braiding fortune
+
+## 3. Chinese (\`zh\`) Symmetry Rules
+
+- Format: \`LEFT|RIGHT\` (full-width \`｜\` is normalized to \`|\`; outer whitespace and spaces around \`|\` are trimmed).
+- Exactly **one \`|\`** separating non-empty left and right halves.
+- **Strict equal length**: each half must be **2 to 6 Unicode characters**, and **\`leftLen === rightLen\`**.
+- **Zero noise**: no whitespace or newlines inside either half, no emoji, no Markdown (\`* _ \\\` # >\`), no \`——\`, and no punctuation (\`, . ! ? ; : ， 。 ！ ？ ； ： 、 " ' “ ” ‘ ’ ( ) （ ） 《 》 【 】 — –\`).
+
+## 4. English (\`en\`) Symmetry & PivotText Math
+
+- Format: \`LEFT|RIGHT\` (internal whitespace runs collapse to single spaces; normalized to **uppercase ASCII**).
+- Exactly **one \`|\`** separating non-empty left and right halves.
+- Each half must match \`/^[A-Z]+(?: [A-Z]+)*$/\` (uppercase ASCII letters \`A-Z\` and single spaces only — no punctuation, apostrophes, hyphens, digits, or emoji).
+- **PivotText rendering algorithm** (matching CSTEIX web & iOS \`PivotText.halves\`):
+  1. Strip all spaces from each half -> \`leftRaw\`, \`rightRaw\`.
+  2. Merge adjacent identical letters (\`dedupe\`, collapsing runs like \`LL -> L\` or \`SS -> S\`, including across word boundaries) **ONLY on the strictly longer raw half**:
+     - \`leftOut = leftRaw.length > rightRaw.length ? dedupe(leftRaw) : leftRaw\`
+     - \`rightOut = rightRaw.length > leftRaw.length ? dedupe(rightRaw) : rightRaw\`
+     - If \`leftRaw.length === rightRaw.length\`, neither half is deduped.
+  3. **Strict server bounds**: both \`leftOut\` and \`rightOut\` must be **6 to 17 characters**, and \`|leftOut.length - rightOut.length| <= 3\` (**aim for \`<= 2\`** for visual balance).
+
+## 5. Mandatory CSTEIX Terminology Glossary
+
+One term, one canonical English word:
+
+| Chinese | Canonical English | Forbidden Substitutes |
+|---|---|---|
+| \`我求\` | \`IX\` (always uppercase noun) | NEVER \`SEEK\`, \`SEEKING\`, \`EXPLORE\`, \`EXPLORING\`, \`QUEST\`, \`PURSUIT\` (rejected by server guard when \`我求\` appears in \`zh\`) |
+| \`道\` | \`DAO\` | never \`WAY\` or \`PATH\` when naming Dao |
+| \`容器\` | \`VESSEL\` | never \`CONTAINER\` |
+| \`分量\` | \`WEIGHT\` | never \`HEFT\` or \`IMPORTANCE\` |
+| \`资格\` | \`STANDING\` | never \`CREDENTIAL\` or \`RIGHT TO EXIST\` |
+
+*(Note: ordinary verbs stay natural English, and \`探求\` in \`未定义处|亦可探求\` renders as \`INQUIRY\`, not \`IX\`.)*
+
+## 6. Five Worked Examples
+
+1. **\`chaos\`**
+   - \`zh\`: \`"一切|基底"\` (left=2, right=2)
+   - \`en\`: \`"ALL THINGS|ONE GROUND"\`
+   - PivotText math: \`leftRaw="ALLTHINGS"\` (9), \`rightRaw="ONEGROUND"\` (9) -> equal length, no dedupe -> \`leftOut="ALLTHINGS"\` (9), \`rightOut="ONEGROUND"\` (9), diff=0.
+2. **\`spacetime\`** (uses \`容器 = VESSEL\`)
+   - \`zh\`: \`"涌现|容器"\` (left=2, right=2)
+   - \`en\`: \`"ALL RISING|ONE VESSEL"\`
+   - PivotText math: \`leftRaw="ALLRISING"\` (9), \`rightRaw="ONEVESSEL"\` (9) -> equal length -> \`leftOut="ALLRISING"\` (9), \`rightOut="ONEVESSEL"\` (9), diff=0.
+3. **\`existence\`** (uses \`道 = DAO\` and longer-half \`dedupe\`)
+   - \`zh\`: \`"以身载道|无身则无"\` (left=4, right=4)
+   - \`en\`: \`"BODY CARRIES DAO|NO BODY NO DAO"\`
+   - PivotText math: \`leftRaw="BODYCARRIESDAO"\` (14) > \`rightRaw="NOBODYNODAO"\` (11) -> dedupe left (\`RR->R\`) -> \`leftOut="BODYCARIESDAO"\` (13), \`rightOut="NOBODYNODAO"\` (11), diff=2.
+4. **\`ix\`** (demonstrates strictly-longer-half-only \`dedupe\`)
+   - \`zh\`: \`"万物之先|是为故事"\` (left=4, right=4)
+   - \`en\`: \`"BEFORE ALL THINGS|THERE WAS STORY"\`
+   - PivotText math: \`leftRaw="BEFOREALLTHINGS"\` (15) > \`rightRaw="THEREWASSTORY"\` (13) -> dedupe left only (\`LL->L\`) -> \`leftOut="BEFOREALTHINGS"\` (14), \`rightOut="THEREWASSTORY"\` (13), diff=1.
+5. **\`ix\`** (uses \`我求 = IX\`)
+   - \`zh\`: \`"此身有尽|我求无涯"\` (left=4, right=4)
+   - \`en\`: \`"THIS BODY ENDS|IX KNOWS NO END"\`
+   - PivotText math: \`leftRaw="THISBODYENDS"\` (12), \`rightRaw="IXKNOWSNOEND"\` (12) -> equal length -> \`leftOut="THISBODYENDS"\` (12), \`rightOut="IXKNOWSNOEND"\` (12), diff=0.
 `;
 
 export const MCP_PROMPTS = [

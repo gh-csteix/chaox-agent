@@ -43,6 +43,7 @@ export interface ServerEnv {
   CHAOX_MCP_READONLY_TOKEN?: string;
   CHAOX_ALLOWED_ORIGINS?: string;
   CHAOX_ALLOW_MCP_PREFERENCES_WRITE?: string;
+  CHAOX_MAX_BODY_BYTES?: string;
   BACKEND_MODE?: string;
   SERVER_NAME?: string;
 }
@@ -401,6 +402,22 @@ export interface BxExerciseInfo {
   secondaryMuscles?: string[];
 }
 
+export interface CsteixWuxuCouplet {
+  id: string;
+  dimension: CsteixDimension;
+  zh: string;
+  en: string;
+  sourceLine?: string | null;
+}
+
+export interface CsteixWuxuCoupletInput {
+  id?: string | null;
+  dimension: string;
+  zh: string;
+  en: string;
+  sourceLine?: string | null;
+}
+
 export interface CsteixWuxuArticle {
   id: string;
   slug: string;
@@ -412,6 +429,7 @@ export interface CsteixWuxuArticle {
   bodyZh: string;
   bodyEn?: string | null;
   rawNotes?: string | null;
+  couplets: CsteixWuxuCouplet[];
   revision: number;
   deletedAt?: string | null;
   createdAt: string;
@@ -432,6 +450,7 @@ export interface CsteixWuxuSummaryItem {
   headings: string[];
   headingsEn?: string[];
   leavingLines: string[];
+  couplets: CsteixWuxuCouplet[];
   revision: number;
   deletedAt?: string | null;
   createdAt: string;
@@ -451,6 +470,7 @@ export interface CsteixWuxuImportItem {
   bodyZh: string;
   bodyEn?: string | null;
   rawNotes?: string | null;
+  couplets?: CsteixWuxuCoupletInput[];
 }
 
 export interface CsteixDwellRecord {

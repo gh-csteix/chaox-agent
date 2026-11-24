@@ -46,26 +46,30 @@ Best if you prefer your own VPS, home server / NAS / Mac mini (with Caddy or Tai
 ```bash
 cd server
 cp .env.example .env
-# Set CHAOX_AUTH_TOKEN in .env (generate with: openssl rand -hex 32)
+# Generate two separate 64-char hex tokens (or run `npm run token` twice):
+#   openssl rand -hex 32  -> CHAOX_SYNC_TOKEN (iOS apps)
+#   openssl rand -hex 32  -> CHAOX_MCP_TOKEN  (AI MCP clients)
 docker compose up -d --build
 ```
+
+`.env.example` leaves token values empty so an unconfigured server fails closed with HTTP `401`, and `node-server.ts` rejects placeholder strings on startup. Legacy single-token `CHAOX_AUTH_TOKEN` remains supported as an optional backwards-compatible fallback.
 
 Put Caddy (`docker compose --profile caddy up -d` + `Caddyfile`), Tailscale Serve/Funnel, or Nginx in front for HTTPS. See [server/README.md](server/README.md) for full VPS, Tailscale, PaaS, and Cloudflare D1 migration instructions.
 
 ### Connect iOS Apps & AI Clients (60 Seconds)
 
-1. Open **SX -> Settings -> AI Assistant** (and **BX**, **CSTEIX**), paste your server base URL + Bearer Token (or paste the client config JSON), choose your granular permissions, and tap **Connect & Sync**.
-2. Add `<your-server-url>/mcp` + `Authorization: Bearer <token>` to your mobile or desktop AI client.
+1. Open **SX -> Settings -> AI Assistant** (and **BX**, **CSTEIX**), paste your server base URL + **`CHAOX_SYNC_TOKEN`** (or paste the App Client Config snippet with both `Sync Token` and `MCP Token` to enable one-tap AI MCP client config export), choose your granular permissions, and tap **Connect & Sync**.
+2. Add `<your-server-url>/mcp` + `Authorization: Bearer <CHAOX_MCP_TOKEN>` to your mobile or desktop AI client (or `<CHAOX_AUTH_TOKEN>` if using legacy single-token mode).
 3. Optional: load [mcp/SKILL.md](mcp/SKILL.md) into your client's skills folder (every MCP client also receives `instructions` and `chaox://guide/skill` automatically).
 
 ---
 
 ## Repository Layout
 
-- [server/](server/) — **Platform-agnostic CHAOX Agent Protocol v1 server** (Web-standard core + Node 22.13+ SQLite HTTP runtime, Dockerfile, Docker Compose + Caddy templates, and canonical `server/migrations/`)
-- [cloudflare-worker/](cloudflare-worker/) — **Recommended (optional) thin Cloudflare Workers + D1 adapter** wrapping `server/src/app.ts` and `server/migrations/`
+- [server/](server/) — **Platform-agnostic CHAOX Agent Protocol v1 server** (Web-standard core + Node 22.13+ SQLite HTTP runtime, Dockerfile, Docker Compose + Caddy templates, and canonical `server/migrations/` including automatic chunked `app_dataset_chunks` (`0006`) storage for large snapshots)
+- [cloudflare-worker/](cloudflare-worker/) — **Recommended (optional) thin Cloudflare Workers + D1 adapter** wrapping `server/src/app.ts` and `server/migrations/` (including automatic `app_dataset_chunks` splitting for D1's 2 MB single-row limit)
 - [CHAOXAgentKit/](CHAOXAgentKit/) — Swift 6 package shared by SX, BX, and CSTEIX (vendor-neutral HTTPS sync client, Keychain token storage, permission enforcement)
-- [mcp/SKILL.md](mcp/SKILL.md) — Portable AI assistant skill prompt (alongside the legacy `mcp/` local iCloud Drive package)
+- [mcp/SKILL.md](mcp/SKILL.md) — Portable AI assistant skill prompt (alongside the legacy local iCloud Drive bridge documented in [mcp/README.md](mcp/README.md))
 - [shortcuts/](shortcuts/) — Apple Shortcuts & on-device `App Intents` recipe
 - [SPEC.md](SPEC.md) — `chaox-agent/v1` protocol wire specification
 - [AGENTS.md](AGENTS.md) — Contributor & AI rules (English docs/code, vendor-neutrality, privacy invariants)

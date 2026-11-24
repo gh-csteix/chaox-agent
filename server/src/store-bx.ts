@@ -39,7 +39,7 @@ export const VALID_TOILET_KINDS = new Set(["bowel", "urination"]);
 export interface BxStoreContext {
   assertReadAccess?(app: AgentAppID): Promise<{ row: AppStateRow | null; policy: PermissionPolicy | null }>;
   assertDomainReadAllowed(app: AgentAppID, domain: string): Promise<void>;
-  assertActionAllowed(app: AgentAppID, action: PermissionAction, domain: string): Promise<{ catalog_json: string | null }>;
+  assertActionAllowed(app: AgentAppID, action: PermissionAction, domain: string): Promise<AppStateRow>;
   assertActionDomainAllowed?(app: AgentAppID, domain: string): Promise<void>;
   readDataset<T>(app: AgentAppID, domain: string): Promise<T[] | null>;
   readAppTimeZone?(app: AgentAppID): Promise<string | undefined>;

@@ -1172,6 +1172,165 @@ struct RemoteExchangeStoreTests {
         #expect(abs(decodedCursor.timeIntervalSince(cursor)) < 0.001)
     }
 
+    @Test("AgentWuxuArticleDTO and delta response decode couplets, default omitted couplets to empty, and round-trip")
+    func wuxuCoupletsDecodeDefaultAndRoundTrip() async throws {
+        let suiteName = "CsteixWuxuCoupletsTests.\(UUID().uuidString)"
+        let store = AgentExchangeStore(
+            app: .csteix,
+            defaultsSuiteName: suiteName,
+            urlSession: self.makeStubSession(),
+            inMemoryTokenStorage: true
+        )
+
+        let expectedZhOne = "\u{6DF7}\u{6C8C}\u{521D}\u{5F00}|\u{4E07}\u{8C61}\u{672A}\u{5206}"
+        let expectedZhTwo = "\u{6211}\u{6C42}\u{65E0}\u{606F}|\u{65E5}\u{884C}\u{6709}\u{58F0}"
+
+        let deltaJSON = #"""
+        {
+          "schemaVersion": "chaox-agent/v1",
+          "app": "csteix",
+          "syncedAt": "2026-11-23T10:00:00.000Z",
+          "totalCount": 3,
+          "articles": [
+            {
+              "id": "11111111-1111-1111-1111-111111111111",
+              "slug": "with-couplets",
+              "title": "With Couplets",
+              "titleEn": "With Couplets EN",
+              "dimensions": ["chaos", "ix"],
+              "writtenAt": "2026-11-23T08:00:00.000Z",
+              "timezone": "Asia/Shanghai",
+              "bodyZh": "Body text.",
+              "bodyEn": "English body.",
+              "rawNotes": null,
+              "revision": 1,
+              "deletedAt": null,
+              "createdAt": "2026-11-23T08:00:00.000Z",
+              "updatedAt": "2026-11-23T08:00:00.000Z",
+              "couplets": [
+                {
+                  "id": "c-1",
+                  "dimension": "chaos",
+                  "zh": "\u6DF7\u6C8C\u521D\u5F00|\u4E07\u8C61\u672A\u5206",
+                  "en": "CHAOS OPENS|ALL REMAINS ONE",
+                  "sourceLine": "First line of draft"
+                },
+                {
+                  "id": "c-2",
+                  "dimension": "ix",
+                  "zh": "\u6211\u6C42\u65E0\u606F|\u65E5\u884C\u6709\u58F0",
+                  "en": "IX NEVER HALTS|DAYS WALK WITH SOUND"
+                }
+              ]
+            },
+            {
+              "id": "22222222-2222-2222-2222-222222222222",
+              "slug": "legacy-omitted-couplets",
+              "title": "Legacy Payload",
+              "titleEn": null,
+              "dimensions": ["existence"],
+              "writtenAt": "2026-11-22T08:00:00Z",
+              "timezone": "Asia/Shanghai",
+              "bodyZh": "Legacy body.",
+              "bodyEn": null,
+              "rawNotes": null,
+              "revision": 2,
+              "deletedAt": null,
+              "createdAt": "2026-11-22T08:00:00Z",
+              "updatedAt": "2026-11-22T09:00:00Z"
+            },
+            {
+              "id": "33333333-3333-3333-3333-333333333333",
+              "slug": "null-couplets",
+              "title": "Null Couplets",
+              "titleEn": null,
+              "dimensions": ["spacetime"],
+              "writtenAt": "2026-11-22T10:00:00Z",
+              "timezone": "Asia/Shanghai",
+              "bodyZh": "Null field body.",
+              "bodyEn": null,
+              "rawNotes": null,
+              "revision": 1,
+              "deletedAt": null,
+              "createdAt": "2026-11-22T10:00:00Z",
+              "updatedAt": "2026-11-22T10:00:00Z",
+              "couplets": null
+            }
+          ]
+        }
+        """#
+
+        StubURLProtocol.handler = { req, _ in
+            if req.url?.path == "/health" {
+                return (200, Data(#"{"status":"ok","schemaVersion":"chaox-agent/v1"}"#.utf8))
+            }
+            if req.url?.path == "/sync/csteix/status" {
+                let status = AgentRemoteStatusResponse(
+                    app: .csteix,
+                    configured: true,
+                    permission: .readWrite
+                )
+                return try (200, AgentJSONCoding.encoder.encode(status))
+            }
+            if req.url?.path == "/sync/csteix/wuxu" {
+                return (200, Data(deltaJSON.utf8))
+            }
+            return (404, Data(#"{"error":"Not found"}"#.utf8))
+        }
+
+        try await store.saveRemoteConfiguration(
+            urlString: "https://chaox.workers.dev",
+            token: "csteix-couplets-token"
+        )
+
+        let delta = try await store.fetchWuxuDelta()
+        #expect(delta.articles.count == 3)
+
+        let withCouplets = delta.articles[0]
+        #expect(withCouplets.couplets == [
+            AgentWuxuCoupletDTO(
+                id: "c-1",
+                dimension: "chaos",
+                zh: expectedZhOne,
+                en: "CHAOS OPENS|ALL REMAINS ONE",
+                sourceLine: "First line of draft"
+            ),
+            AgentWuxuCoupletDTO(
+                id: "c-2",
+                dimension: "ix",
+                zh: expectedZhTwo,
+                en: "IX NEVER HALTS|DAYS WALK WITH SOUND",
+                sourceLine: nil
+            )
+        ])
+
+        // Legacy payload omitting "couplets" and payload with null "couplets" both decode to [].
+        #expect(delta.articles[1].couplets.isEmpty)
+        #expect(delta.articles[2].couplets.isEmpty)
+
+        // Direct encode/decode round-trip on both response and article DTO.
+        let encodedDelta = try AgentJSONCoding.encoder.encode(delta)
+        let decodedDelta = try AgentJSONCoding.decoder.decode(AgentRemoteWuxuDeltaResponse.self, from: encodedDelta)
+        #expect(decodedDelta == delta)
+
+        let now = Date(timeIntervalSince1970: 1_795_400_000.25)
+        let sourceCompatibleDefaultArticle = AgentWuxuArticleDTO(
+            id: "44444444-4444-4444-4444-444444444444",
+            slug: "source-compat",
+            title: "Source Compat",
+            dimensions: ["chaos"],
+            writtenAt: now,
+            bodyZh: "Body",
+            createdAt: now,
+            updatedAt: now
+        )
+        #expect(sourceCompatibleDefaultArticle.couplets.isEmpty)
+
+        let roundTrippedArticleData = try AgentJSONCoding.encoder.encode(withCouplets)
+        let roundTrippedArticle = try AgentJSONCoding.decoder.decode(AgentWuxuArticleDTO.self, from: roundTrippedArticleData)
+        #expect(roundTrippedArticle == withCouplets)
+    }
+
     private static func makeSampleReceipts(count: Int) -> [AgentReceipt] {
         (1 ... count).map { index in
             let receiptStatus: AgentReceiptStatus = switch index {

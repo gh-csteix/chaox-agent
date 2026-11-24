@@ -1,4 +1,5 @@
 import {
+  AppStateRow,
   generateRequestId,
   localDateHourParts,
   localDateKey,
@@ -6,6 +7,7 @@ import {
   matchesQuery,
   normalizePagination,
   paginate,
+  parsePolicyFromRow,
   rankFuzzyMatches,
   requireNonEmptyString,
   resolveSxTimestamp,
@@ -23,6 +25,30 @@ import {
   SxSloganRecord,
   SxTagRecord
 } from "./types.js";
+
+export interface SxCredentialCandidate {
+  id: number;
+  username: string;
+  type: string;
+  website: string;
+  issuer: string;
+}
+
+type SxCredentialResolution =
+  | {
+      status: "explicit" | "auto_bound";
+      credentialId: number;
+      boundCredential?: SxCredentialCandidate;
+    }
+  | {
+      status: "explicit_none" | "none" | "credentials_scope_disabled";
+      credentialId: null;
+    }
+  | {
+      status: "selection_required";
+      credentialId: null;
+      candidates: SxCredentialCandidate[];
+    };
 
 const VALID_CYCLES = new Set(["daily", "weekly", "monthly", "quarterly", "yearly", "irregular"]);
 const VALID_PRICE_TYPES = new Set(["fixed", "floating"]);
@@ -327,6 +353,8 @@ export class SxOperations {
     offset?: number;
   } = {}): Promise<Record<string, unknown>> {
     await this.ctx.assertDomainReadAllowed("sx", "expenses");
+    const access = this.ctx.assertReadAccess ? await this.ctx.assertReadAccess("sx") : null;
+    const allowCredentials = Boolean(access?.policy?.allowedDomains.includes("credentials"));
     const [dataset, pending, timeZone, catalog] = await Promise.all([
       this.ctx.readDataset<SxExpenseRecord>("sx", "expenses"),
       this.ctx.listPendingEnvelopes("sx"),
@@ -459,6 +487,10 @@ export class SxOperations {
     }
 
     for (const item of items) {
+      if (!allowCredentials) {
+        delete item.credentialId;
+        delete item.credentialName;
+      }
       enrichExpenseLocalFields(item, timeZone);
     }
     let filtered = items.filter((item) => matchesDateRange(item.paidAt, options.from, options.to, item.localDate, timeZone));
@@ -511,6 +543,8 @@ export class SxOperations {
     offset?: number;
   } = {}): Promise<Record<string, unknown>> {
     await this.ctx.assertDomainReadAllowed("sx", "incomes");
+    const access = this.ctx.assertReadAccess ? await this.ctx.assertReadAccess("sx") : null;
+    const allowCredentials = Boolean(access?.policy?.allowedDomains.includes("credentials"));
     const [dataset, pending, timeZone, catalog] = await Promise.all([
       this.ctx.readDataset<SxIncomeRecord>("sx", "incomes"),
       this.ctx.listPendingEnvelopes("sx"),
@@ -640,6 +674,10 @@ export class SxOperations {
     }
 
     for (const item of items) {
+      if (!allowCredentials) {
+        delete item.credentialId;
+        delete item.credentialName;
+      }
       if (!item.localDate) {
         const key = localDateKey(item.receivedAt, timeZone);
         if (key) item.localDate = key;
@@ -790,8 +828,9 @@ export class SxOperations {
 
   // MARK: - Expenses & Refunds CRUD
 
-  private async listPendingCreatedProjects(): Promise<Array<{ name: string; cashFlowSides: string }>> {
-    const pending = await this.ctx.listPendingEnvelopes("sx");
+  private extractPendingCreatedProjects(
+    pending: InboxEnvelope[]
+  ): Array<{ name: string; cashFlowSides: string }> {
     const created: Array<{ name: string; cashFlowSides: string }> = [];
     for (const env of pending) {
       if (env.op !== "create_project") continue;
@@ -804,6 +843,255 @@ export class SxOperations {
       created.push({ name, cashFlowSides });
     }
     return created;
+  }
+
+  private async listPendingCreatedProjects(): Promise<Array<{ name: string; cashFlowSides: string }>> {
+    const pending = await this.ctx.listPendingEnvelopes("sx");
+    return this.extractPendingCreatedProjects(pending);
+  }
+
+  private async loadProjectCredentialCandidates(
+    normalizedProject: string,
+    catalog: SxCatalog | null,
+    pending: InboxEnvelope[]
+  ): Promise<{
+    datasetAvailable: boolean;
+    isPendingCreatedProject: boolean;
+    candidates: SxCredentialCandidate[];
+  }> {
+    const normalizedKey = normalizedProject.trim().toLowerCase();
+    let targetProjectId: number | null = null;
+    const projectNameById = new Map<number, string>();
+    for (const proj of catalog?.projects ?? []) {
+      const parsedId = Number(proj.id);
+      if (Number.isInteger(parsedId) && parsedId > 0) {
+        projectNameById.set(parsedId, proj.name);
+        if (targetProjectId === null && proj.name.trim().toLowerCase() === normalizedKey) {
+          targetProjectId = parsedId;
+        }
+      }
+    }
+
+    const [credentialsDataset, projectsDataset] = await Promise.all([
+      this.ctx.readDataset<SxCredentialRecord>("sx", "credentials"),
+      targetProjectId === null
+        ? this.ctx.readDataset<SxProjectRecord>("sx", "projects")
+        : Promise.resolve(null)
+    ]);
+
+    for (const proj of projectsDataset ?? []) {
+      if (Number.isInteger(proj.id) && proj.id > 0) {
+        if (!projectNameById.has(proj.id)) {
+          projectNameById.set(proj.id, proj.name);
+        }
+        if (targetProjectId === null && proj.name.trim().toLowerCase() === normalizedKey) {
+          targetProjectId = proj.id;
+        }
+      }
+    }
+
+    const isPendingCreatedProject =
+      targetProjectId === null &&
+      pending.some(
+        (env) =>
+          env.op === "create_project" &&
+          typeof env.payload.name === "string" &&
+          env.payload.name.trim().toLowerCase() === normalizedKey
+      );
+
+    if (credentialsDataset === null) {
+      return { datasetAvailable: false, isPendingCreatedProject, candidates: [] };
+    }
+
+    interface TrackedCredential {
+      id: number;
+      username: string;
+      type: string;
+      website: string;
+      issuer: string;
+      deleted: boolean;
+      links: Array<{ projectId: number; projectName: string }>;
+    }
+
+    const byId = new Map<number, TrackedCredential>();
+    for (const cred of credentialsDataset) {
+      if (!Number.isInteger(cred.id) || cred.id <= 0) continue;
+      byId.set(cred.id, {
+        id: cred.id,
+        username: cred.username ?? "",
+        type: cred.type ?? "",
+        website: cred.website ?? "",
+        issuer: cred.issuer ?? "",
+        deleted: false,
+        links: (cred.links ?? []).map((link) => ({
+          projectId: Number(link.projectId),
+          projectName: link.projectName ?? ""
+        }))
+      });
+    }
+
+    for (const env of pending) {
+      if (env.op === "update_credential") {
+        const target = byId.get(Number(env.payload.id));
+        if (target) {
+          if (typeof env.payload.username === "string") target.username = env.payload.username;
+          if (typeof env.payload.type === "string") target.type = env.payload.type;
+          if (typeof env.payload.website === "string") target.website = env.payload.website;
+          if (typeof env.payload.issuer === "string") target.issuer = env.payload.issuer;
+        }
+      } else if (env.op === "delete_credential") {
+        const target = byId.get(Number(env.payload.id));
+        if (target) {
+          target.deleted = true;
+        }
+      } else if (env.op === "link_credential") {
+        const target = byId.get(Number(env.payload.credentialId));
+        const projId = Number(env.payload.projectId);
+        if (target && Number.isInteger(projId) && projId > 0) {
+          const projName = projectNameById.get(projId) ?? "";
+          const existingIdx = target.links.findIndex((link) => link.projectId === projId);
+          if (existingIdx >= 0) {
+            target.links[existingIdx] = { projectId: projId, projectName: projName };
+          } else {
+            target.links.push({ projectId: projId, projectName: projName });
+          }
+        }
+      } else if (env.op === "unlink_credential") {
+        const target = byId.get(Number(env.payload.credentialId));
+        const projId = Number(env.payload.projectId);
+        if (target && Number.isInteger(projId)) {
+          target.links = target.links.filter((link) => link.projectId !== projId);
+        }
+      }
+      // Pending create_credential entries have id = -1 until iOS sync assigns a row ID,
+      // so they cannot be referenced by credentialId yet.
+    }
+
+    const candidates: SxCredentialCandidate[] = [];
+    for (const cred of byId.values()) {
+      if (cred.deleted) continue;
+      const isLinked = cred.links.some((link) => {
+        if (targetProjectId !== null) {
+          return (
+            link.projectId === targetProjectId ||
+            (link.projectId <= 0 && link.projectName.trim().toLowerCase() === normalizedKey)
+          );
+        }
+        return link.projectName.trim().toLowerCase() === normalizedKey;
+      });
+      if (!isLinked) continue;
+      candidates.push({
+        id: cred.id,
+        username: cred.username,
+        type: cred.type,
+        website: cred.website,
+        issuer: cred.issuer
+      });
+    }
+
+    candidates.sort(
+      (a, b) => a.username.toLowerCase().localeCompare(b.username.toLowerCase()) || a.id - b.id
+    );
+    return { datasetAvailable: true, isPendingCreatedProject, candidates };
+  }
+
+  private async resolveRecordCredential(
+    state: AppStateRow,
+    normalizedProject: string,
+    catalog: SxCatalog | null,
+    pending: InboxEnvelope[],
+    input: { credentialId?: number | null; skipCredential?: boolean }
+  ): Promise<SxCredentialResolution> {
+    if (input.credentialId !== undefined && input.credentialId !== null && input.skipCredential === true) {
+      throw new Error("Cannot provide both 'credentialId' and 'skipCredential: true'.");
+    }
+    if (input.skipCredential === true || input.credentialId === null) {
+      return { status: "explicit_none", credentialId: null };
+    }
+    const policy = parsePolicyFromRow(state);
+    const credentialsAllowed = policy.allowedDomains.includes("credentials");
+
+    if (input.credentialId !== undefined) {
+      await this.ctx.assertActionDomainAllowed?.("sx", "credentials");
+      const credId = validateId(input.credentialId, "credentialId");
+      if (credentialsAllowed && policy.allowRead) {
+        const { datasetAvailable, isPendingCreatedProject, candidates } =
+          await this.loadProjectCredentialCandidates(normalizedProject, catalog, pending);
+        if (datasetAvailable && !isPendingCreatedProject) {
+          const matched = candidates.find((c) => c.id === credId);
+          if (!matched) {
+            if (candidates.length > 0) {
+              const listText = candidates
+                .map((c) => `#${c.id} ${c.username || c.type || "unnamed"}`)
+                .join(", ");
+              throw new Error(
+                `Credential #${credId} is not actively linked to project '${normalizedProject}'. Linked credentials: ${listText}. Choose one of these IDs or pass 'skipCredential: true' to leave unbound.`
+              );
+            }
+            throw new Error(
+              `Credential #${credId} is not actively linked to project '${normalizedProject}', and this project has no linked credentials. Omit 'credentialId' to record without a credential (do not create a new credential unless the user asks).`
+            );
+          }
+          return { status: "explicit", credentialId: credId, boundCredential: matched };
+        }
+      }
+      return { status: "explicit", credentialId: credId };
+    }
+
+    if (!credentialsAllowed) {
+      return { status: "credentials_scope_disabled", credentialId: null };
+    }
+    if (!policy.allowRead) {
+      return { status: "none", credentialId: null };
+    }
+
+    const { datasetAvailable, candidates } = await this.loadProjectCredentialCandidates(
+      normalizedProject,
+      catalog,
+      pending
+    );
+    if (!datasetAvailable || candidates.length === 0) {
+      return { status: "none", credentialId: null };
+    }
+    if (candidates.length === 1) {
+      return { status: "auto_bound", credentialId: candidates[0].id, boundCredential: candidates[0] };
+    }
+    return { status: "selection_required", credentialId: null, candidates };
+  }
+
+  private formatCredentialCandidateLabel(candidate: SxCredentialCandidate): string {
+    const details = [candidate.type, candidate.issuer, candidate.website]
+      .map((v) => v.trim())
+      .filter((v) => v.length > 0);
+    const baseName = candidate.username.trim() || candidate.type.trim() || "unnamed";
+    return details.length > 0
+      ? `#${candidate.id} (${baseName} — ${details.join(" / ")})`
+      : `#${candidate.id} (${baseName})`;
+  }
+
+  private buildCredentialSelectionResponse(
+    mode: "expense" | "income",
+    projectName: string,
+    candidates: SxCredentialCandidate[]
+  ): Record<string, unknown> {
+    const isExpense = mode === "expense";
+    const recordKind = isExpense ? "Expense" : "Income";
+    const toolName = isExpense ? "sx_record_expense" : "sx_record_income";
+    const candidateSummary = candidates.map((c) => this.formatCredentialCandidateLabel(c)).join("; ");
+    return {
+      queued: false,
+      credentialSelectionRequired: true,
+      credentialResolution: "selection_required",
+      credentialId: null,
+      app: "sx",
+      op: isExpense ? "record_expense" : "record_income",
+      projectName,
+      credentialCandidates: candidates,
+      selectionPrompt:
+        `${recordKind} was NOT queued yet because project '${projectName}' has ${candidates.length} linked credentials: ${candidateSummary}. ` +
+        `Ask the user which credential to bind, then re-call ${toolName} with credentialId=<chosen id> (or skipCredential=true to explicitly leave unbound). ` +
+        `Do NOT create a new credential unless the user asks.`
+    };
   }
 
   private async findExpenseForUpdate(id: number): Promise<SxExpenseRecord | null> {
@@ -838,7 +1126,7 @@ export class SxOperations {
     catalogJson: string | null,
     pendingProjects: Array<{ name: string; cashFlowSides: string }> = [],
     fallbackTimeZone?: string
-  ): { payload: Record<string, unknown>; timeZone?: string } {
+  ): { payload: Record<string, unknown>; timeZone?: string; catalog: SxCatalog | null } {
     if (!Number.isFinite(input.amount) || input.amount <= 0) {
       throw new Error("SX amount must be a finite number greater than 0.");
     }
@@ -866,13 +1154,142 @@ export class SxOperations {
     const mergedNote = input.note ?? input.notes;
     if (mergedNote?.trim()) payload.note = mergedNote.trim();
     if (isoDate) payload.date = isoDate;
-    return { payload, timeZone };
+    return { payload, timeZone, catalog };
+  }
+
+  private async recordCashFlow(
+    mode: "expense" | "income",
+    input: {
+      amount: number;
+      projectName: string;
+      credentialId?: number | null;
+      skipCredential?: boolean;
+      currency?: string;
+      tags?: string[];
+      note?: string;
+      notes?: string;
+      date?: string;
+      hour?: unknown;
+      requestId?: string;
+      client?: string;
+    }
+  ): Promise<Record<string, unknown>> {
+    const domain = mode === "expense" ? "expenses" : "incomes";
+    const opName = mode === "expense" ? "record_expense" : "record_income";
+    const prefix = mode === "expense" ? "sx-exp" : "sx-inc";
+
+    const state = await this.ctx.assertActionAllowed("sx", "create", domain);
+    const pendingEnvelopes = await this.ctx.listPendingEnvelopes("sx");
+    const pendingProjects = this.extractPendingCreatedProjects(pendingEnvelopes);
+    const fallbackTz = await this.ctx.readAppTimeZone?.("sx");
+    const { payload, timeZone, catalog } = this.validateRecordPayload(
+      input,
+      mode,
+      state.catalog_json,
+      pendingProjects,
+      fallbackTz
+    );
+
+    if (input.credentialId !== undefined && input.credentialId !== null && input.skipCredential === true) {
+      throw new Error("Cannot provide both 'credentialId' and 'skipCredential: true'.");
+    }
+    if (input.credentialId !== undefined && input.credentialId !== null) {
+      await this.ctx.assertActionDomainAllowed?.("sx", "credentials");
+      validateId(input.credentialId, "credentialId");
+    }
+
+    const normalizedProject = String(payload.projectName);
+    const explicitRequestId = input.requestId?.trim();
+    if (explicitRequestId) {
+      const existingReceipt = await this.ctx.lookupReceiptByRequestId?.("sx", explicitRequestId);
+      if (existingReceipt) {
+        return {
+          queued: false,
+          alreadyProcessed: true,
+          receipt: existingReceipt
+        };
+      }
+      const existingInbox = pendingEnvelopes.find((env) => env.requestId === explicitRequestId);
+      if (existingInbox) {
+        const storedCredId =
+          typeof existingInbox.payload.credentialId === "number" ? existingInbox.payload.credentialId : null;
+        const policy = parsePolicyFromRow(state);
+        let boundCredential: SxCredentialCandidate | undefined;
+        if (storedCredId !== null && policy.allowedDomains.includes("credentials") && policy.allowRead) {
+          const { candidates } = await this.loadProjectCredentialCandidates(
+            normalizedProject,
+            catalog,
+            pendingEnvelopes
+          );
+          boundCredential = candidates.find((c) => c.id === storedCredId);
+        }
+        const existingDate =
+          mode === "expense" && typeof existingInbox.payload.date === "string"
+            ? existingInbox.payload.date
+            : undefined;
+        const existingLocalTime = resolvedLocalTimeMeta(existingDate, timeZone);
+        return {
+          queued: true,
+          duplicateInInbox: true,
+          app: "sx",
+          op: existingInbox.op,
+          requestId: explicitRequestId,
+          createdAt: existingInbox.createdAt,
+          normalizedPayload: existingInbox.payload,
+          credentialId: storedCredId,
+          ...(boundCredential ? { boundCredential } : {}),
+          ...(existingLocalTime ? { resolvedLocalTime: existingLocalTime } : {})
+        };
+      }
+    }
+
+    const resolution = await this.resolveRecordCredential(
+      state,
+      normalizedProject,
+      catalog,
+      pendingEnvelopes,
+      input
+    );
+    if (resolution.status === "selection_required") {
+      return this.buildCredentialSelectionResponse(mode, normalizedProject, resolution.candidates);
+    }
+    if (resolution.credentialId !== null) {
+      payload.credentialId = resolution.credentialId;
+    }
+
+    const requestId = explicitRequestId || generateRequestId(prefix);
+    payload.stableID = `sx:remote:${requestId}`;
+    const result = await this.ctx.enqueueInbox("sx", opName, requestId, input.client, payload);
+    if (result.queued !== true) {
+      return result;
+    }
+
+    const normalizedPayload = result.normalizedPayload as Record<string, unknown> | undefined;
+    const effectiveCredentialId =
+      typeof normalizedPayload?.credentialId === "number" ? normalizedPayload.credentialId : null;
+    const boundCredential =
+      resolution.status === "explicit" || resolution.status === "auto_bound"
+        ? resolution.boundCredential && resolution.boundCredential.id === effectiveCredentialId
+          ? resolution.boundCredential
+          : undefined
+        : undefined;
+    const effectiveDate =
+      mode === "expense" && typeof normalizedPayload?.date === "string" ? normalizedPayload.date : undefined;
+    const localTime = resolvedLocalTimeMeta(effectiveDate, timeZone);
+    return {
+      ...result,
+      credentialId: effectiveCredentialId,
+      ...(boundCredential ? { boundCredential } : {}),
+      credentialResolution: resolution.status,
+      ...(localTime ? { resolvedLocalTime: localTime } : {})
+    };
   }
 
   async recordExpense(input: {
     amount: number;
     projectName: string;
-    credentialId?: number;
+    credentialId?: number | null;
+    skipCredential?: boolean;
     currency?: string;
     tags?: string[];
     note?: string;
@@ -882,27 +1299,7 @@ export class SxOperations {
     requestId?: string;
     client?: string;
   }): Promise<Record<string, unknown>> {
-    const state = await this.ctx.assertActionAllowed("sx", "create", "expenses");
-    const pendingProjects = await this.listPendingCreatedProjects();
-    const fallbackTz = await this.ctx.readAppTimeZone?.("sx");
-    const { payload, timeZone } = this.validateRecordPayload(
-      input,
-      "expense",
-      state.catalog_json,
-      pendingProjects,
-      fallbackTz
-    );
-    if (input.credentialId !== undefined) {
-      await this.ctx.assertActionDomainAllowed?.("sx", "credentials");
-      payload.credentialId = validateId(input.credentialId, "credentialId");
-    }
-    const requestId = input.requestId?.trim() || generateRequestId("sx-exp");
-    payload.stableID = `sx:remote:${requestId}`;
-    const result = await this.ctx.enqueueInbox("sx", "record_expense", requestId, input.client, payload);
-    const normalizedPayload = result.normalizedPayload as Record<string, unknown> | undefined;
-    const effectiveDate = typeof normalizedPayload?.date === "string" ? normalizedPayload.date : undefined;
-    const localTime = resolvedLocalTimeMeta(effectiveDate, timeZone);
-    return localTime && result.queued === true ? { ...result, resolvedLocalTime: localTime } : result;
+    return this.recordCashFlow("expense", input);
   }
 
   private async resolvePendingSxTarget(
@@ -1068,7 +1465,11 @@ export class SxOperations {
 
     if (target.kind === "pending" && this.ctx.updatePendingEnvelopePayload) {
       const nextPayload: Record<string, unknown> = { ...target.envelope.payload, ...updates };
-      if (clearCredentialFlag) {
+      const previousProject = String(target.envelope.payload.projectName ?? "").trim().toLowerCase();
+      const movedProject =
+        typeof updates.projectName === "string" &&
+        updates.projectName.trim().toLowerCase() !== previousProject;
+      if (clearCredentialFlag || (movedProject && updates.credentialId === undefined)) {
         delete nextPayload.credentialId;
         delete nextPayload.clearCredential;
       }
@@ -1193,7 +1594,8 @@ export class SxOperations {
   async recordIncome(input: {
     amount: number;
     projectName: string;
-    credentialId?: number;
+    credentialId?: number | null;
+    skipCredential?: boolean;
     currency?: string;
     tags?: string[];
     note?: string;
@@ -1202,23 +1604,7 @@ export class SxOperations {
     requestId?: string;
     client?: string;
   }): Promise<Record<string, unknown>> {
-    const state = await this.ctx.assertActionAllowed("sx", "create", "incomes");
-    const pendingProjects = await this.listPendingCreatedProjects();
-    const fallbackTz = await this.ctx.readAppTimeZone?.("sx");
-    const { payload } = this.validateRecordPayload(
-      input,
-      "income",
-      state.catalog_json,
-      pendingProjects,
-      fallbackTz
-    );
-    if (input.credentialId !== undefined) {
-      await this.ctx.assertActionDomainAllowed?.("sx", "credentials");
-      payload.credentialId = validateId(input.credentialId, "credentialId");
-    }
-    const requestId = input.requestId?.trim() || generateRequestId("sx-inc");
-    payload.stableID = `sx:remote:${requestId}`;
-    return this.ctx.enqueueInbox("sx", "record_income", requestId, input.client, payload);
+    return this.recordCashFlow("income", input);
   }
 
   async updateIncome(input: {
@@ -1278,7 +1664,11 @@ export class SxOperations {
 
     if (target.kind === "pending" && this.ctx.updatePendingEnvelopePayload) {
       const nextPayload: Record<string, unknown> = { ...target.envelope.payload, ...updates };
-      if (clearCredentialFlag) {
+      const previousProject = String(target.envelope.payload.projectName ?? "").trim().toLowerCase();
+      const movedProject =
+        typeof updates.projectName === "string" &&
+        updates.projectName.trim().toLowerCase() !== previousProject;
+      if (clearCredentialFlag || (movedProject && updates.credentialId === undefined)) {
         delete nextPayload.credentialId;
         delete nextPayload.clearCredential;
       }

@@ -4,18 +4,23 @@ import {
 import { BxOperations } from "./store-bx.js";
 import { CsteixOperations } from "./store-csteix.js";
 import {
+  AppDatasetChunkRow,
   AppDatasetRow,
   AppStateRow,
+  ChunkedDatasetManifest,
+  DEFAULT_DATASET_CHUNK_MAX_BYTES,
   InboxRow,
   localDateKey,
   localDateTimeParts,
   mapInboxRow,
   mapReceiptRow,
   matchesSxPeriod,
+  parseChunkedDatasetManifest,
   parsePolicyFromRow,
   ReceiptRow,
   requireNonEmptyString,
   safeJsonParse,
+  splitUtf8Chunks,
   VALID_APPS,
   VALID_PERMISSIONS
 } from "./store-helpers.js";
@@ -83,7 +88,11 @@ const OP_DOMAIN_MAP: Record<string, string> = {
   update_workout_exercise: "workouts",
   delete_workout_exercise: "workouts",
   reorder_workout_exercises: "workouts",
-  update_workout_type: "workouts"
+  update_workout_type: "workouts",
+  create_wuxu: "wuxu",
+  update_wuxu: "wuxu",
+  delete_wuxu: "wuxu",
+  restore_wuxu: "wuxu"
 };
 
 function opKindForPermission(op: string): "create" | "update" | "delete" {
@@ -109,20 +118,47 @@ function isAppRecordReadable(state: AppStateRow | undefined, op?: string): boole
   return true;
 }
 
+function isSxCredentialsAllowed(state: AppStateRow | null | undefined): boolean {
+  if (!state) return false;
+  const policy = parsePolicyFromRow(state);
+  return state.permission !== "disabled" && policy.allowRead && policy.allowedDomains.includes("credentials");
+}
+
+function sanitizeSxPendingPayload(
+  payload: Record<string, unknown>,
+  allowCredentials: boolean
+): Record<string, unknown> {
+  if (allowCredentials || (!("credentialId" in payload) && !("credentialName" in payload))) {
+    return payload;
+  }
+  const { credentialId: _cid, credentialName: _cname, ...rest } = payload;
+  return rest;
+}
+
 export class ExchangeStore {
   readonly bx: BxOperations;
   readonly sx: SxOperations;
   readonly csteix: CsteixOperations;
   private readonly backendMode: string;
   private readonly defaultClient: string;
+  private readonly datasetChunkMaxBytes: number;
   private readonly appStateCache = new Map<AgentAppID, AppStateRow | null>();
 
   constructor(
     private readonly db: SqlDatabase,
-    options: { backendMode?: string; defaultClient?: string } = {}
+    options: { backendMode?: string; defaultClient?: string; datasetChunkMaxBytes?: number } = {}
   ) {
+    if (
+      options.datasetChunkMaxBytes !== undefined &&
+      (!Number.isInteger(options.datasetChunkMaxBytes) || options.datasetChunkMaxBytes < 4)
+    ) {
+      throw new Error(
+        `datasetChunkMaxBytes must be an integer >= 4 (received ${options.datasetChunkMaxBytes}).`
+      );
+    }
     this.backendMode = options.backendMode?.trim() || "sqlite";
     this.defaultClient = options.defaultClient?.trim() || "chaox-agent-server";
+    this.datasetChunkMaxBytes = options.datasetChunkMaxBytes ?? DEFAULT_DATASET_CHUNK_MAX_BYTES;
     this.bx = new BxOperations(this);
     this.sx = new SxOperations(this);
     this.csteix = new CsteixOperations(this);
@@ -269,7 +305,84 @@ export class ExchangeStore {
       .bind(app, domain)
       .first<{ payload_json: string }>();
     if (!row) return null;
-    return safeJsonParse<T[]>(row.payload_json) ?? [];
+
+    const manifest = parseChunkedDatasetManifest(row.payload_json);
+    if (!manifest) {
+      return safeJsonParse<T[]>(row.payload_json) ?? [];
+    }
+
+    const { results } = await this.db
+      .prepare(
+        "SELECT chunk_index, chunk_data FROM app_dataset_chunks WHERE app = ? AND domain = ? ORDER BY chunk_index ASC"
+      )
+      .bind(app, domain)
+      .all<Pick<AppDatasetChunkRow, "chunk_index" | "chunk_data">>();
+
+    if (
+      results.length !== manifest.chunkCount ||
+      results.some((chunk, idx) => chunk.chunk_index !== idx)
+    ) {
+      throw new Error(
+        `Dataset '${app}/${domain}' is incomplete (expected ${manifest.chunkCount} chunks, found ${results.length}). Re-sync from ${app.toUpperCase()} Settings -> AI Assistant.`
+      );
+    }
+
+    const fullJson = results.map((chunk) => chunk.chunk_data).join("");
+    return safeJsonParse<T[]>(fullJson) ?? [];
+  }
+
+  private buildDatasetWriteStatements(
+    app: AgentAppID,
+    domain: string,
+    value: unknown,
+    now: string
+  ): SqlPreparedStatement[] {
+    const payloadJson = JSON.stringify(value);
+    const count = Array.isArray(value) ? value.length : 1;
+    const split = splitUtf8Chunks(payloadJson, this.datasetChunkMaxBytes);
+    const statements: SqlPreparedStatement[] = [
+      this.db.prepare("DELETE FROM app_dataset_chunks WHERE app = ? AND domain = ?").bind(app, domain)
+    ];
+
+    if (!split.chunked) {
+      statements.push(
+        this.db
+          .prepare(
+            `INSERT OR REPLACE INTO app_dataset (app, domain, payload_json, record_count, updated_at)
+             VALUES (?, ?, ?, ?, ?)`
+          )
+          .bind(app, domain, payloadJson, count, now)
+      );
+      return statements;
+    }
+
+    const manifest: ChunkedDatasetManifest = {
+      __chaoxDatasetStorage: "chunked_v1",
+      chunkCount: split.chunks.length,
+      byteLength: split.totalBytes
+    };
+
+    statements.push(
+      this.db
+        .prepare(
+          `INSERT OR REPLACE INTO app_dataset (app, domain, payload_json, record_count, updated_at)
+           VALUES (?, ?, ?, ?, ?)`
+        )
+        .bind(app, domain, JSON.stringify(manifest), count, now)
+    );
+
+    for (let chunkIndex = 0; chunkIndex < split.chunks.length; chunkIndex += 1) {
+      statements.push(
+        this.db
+          .prepare(
+            `INSERT INTO app_dataset_chunks (app, domain, chunk_index, chunk_data, updated_at)
+             VALUES (?, ?, ?, ?, ?)`
+          )
+          .bind(app, domain, chunkIndex, split.chunks[chunkIndex], now)
+      );
+    }
+
+    return statements;
   }
 
   async readAppTimeZone(app: AgentAppID): Promise<string | undefined> {
@@ -416,8 +529,14 @@ export class ExchangeStore {
       if (!latestUpdate || row.updated_at > latestUpdate) {
         latestUpdate = row.updated_at;
       }
+      const policy = parsePolicyFromRow(fullRow);
       const datasetCounts: Record<string, number> = { ...(countsByApp[row.app] ?? {}) };
-      if (row.app === "csteix") {
+      if (
+        row.app === "csteix" &&
+        row.permission !== "disabled" &&
+        policy.allowRead &&
+        policy.allowedDomains.includes("wuxu")
+      ) {
         datasetCounts.wuxu = activeWuxuCount;
       }
       apps[row.app] = {
@@ -425,7 +544,7 @@ export class ExchangeStore {
         bundleId: row.bundle_id,
         appVersion: row.app_version,
         permission: row.permission,
-        policy: parsePolicyFromRow(fullRow),
+        policy,
         datasetCounts,
         capabilities: safeJsonParse<string[]>(row.capabilities_json) ?? [],
         lastSyncAt: row.last_sync_at ?? row.updated_at,
@@ -458,6 +577,15 @@ export class ExchangeStore {
         ? `${prefs.content.slice(0, 2000)}...`
         : prefs.content;
 
+    const sxCredentialsAllowed = isSxCredentialsAllowed(stateByApp.get("sx"));
+    const matchedPending = options.requestId
+      ? filterAllowedReadable(receiptInfo.pending).map((env) =>
+          env.app === "sx"
+            ? { ...env, payload: sanitizeSxPendingPayload(env.payload, sxCredentialsAllowed) }
+            : env
+        )
+      : undefined;
+
     return {
       backend: this.backendMode,
       schemaVersion: SCHEMA_VERSION,
@@ -468,7 +596,7 @@ export class ExchangeStore {
       ...(hasCustomPreferences ? { preferences: truncatedPrefs } : {}),
       apps,
       pendingInbox: visiblePendingInbox,
-      matchedPending: options.requestId ? filterAllowedReadable(receiptInfo.pending) : undefined,
+      matchedPending,
       recentReceipts: filterAllowedReadable(receiptInfo.receipts)
     };
   }
@@ -502,7 +630,10 @@ export class ExchangeStore {
         hour: "Optional integer 0..23: 24-hour local hour in timeZoneIdentifier; sets/overrides HH in YYYY-MM-DD-HH (uses today if date omitted).",
         tags: "Optional string[]: OMIT to inherit the project's recentExpenseTags; pass [] to clear all tags; pass array to set exact tags (missing tags auto-create on device).",
         note: "Optional string (singular 'note' on write): merchant, dish, item, or order memo shown as one line on cards; put key details first.",
-        credentialId: "Optional integer >= 1 (requires 'credentials' scope opt-in): linked credential ID from sx_list_credentials.",
+        credentialId:
+          "Optional integer >= 1 (requires 'credentials' scope opt-in, must be linked to projectName). When omitted with 'credentials' enabled: auto-binds if the project has 1 linked credential; returns queued=false + credentialSelectionRequired=true + credentialCandidates if multiple exist so you MUST ask the user to choose; leaves unbound if 0 exist. Never auto-create credentials. Responses always return the bound credentialId (or null).",
+        skipCredential:
+          "Optional boolean: set true to explicitly leave the expense/income unbound without a credential (bypasses auto-bind and multi-credential selection prompt; cannot combine with credentialId).",
         requestId: "Optional idempotency key so retries never duplicate records.",
         client: "Optional short calling AI client label (e.g. 'claude', 'cursor')."
       },
@@ -531,7 +662,8 @@ export class ExchangeStore {
         "Omitting tags on create inherits the project's latest tags; passing [] explicitly clears tags.",
         "Write tools use 'note' (singular) for expense/income/refund memos, while list responses return 'notes' (plural).",
         "Passing bare YYYY-MM-DD without 'hour' records local 00:00 (displayed as YYYY-MM-DD-00).",
-        "sx_update_expense applies partial patches in FIFO order on device: omitted fields stay unchanged, and queued creates (id: -1) can be edited/cancelled directly via pendingRequestId."
+        "sx_update_expense applies partial patches in FIFO order on device: omitted fields stay unchanged, and queued creates (id: -1) can be edited/cancelled directly via pendingRequestId.",
+        "Credential binding rule (when 'credentials' scope is enabled): 1 linked credential -> server auto-binds; multiple -> server returns queued=false with credentialSelectionRequired=true and credentialCandidates so you MUST ask the user to choose (or pass skipCredential=true); 0 -> leaves blank and NEVER auto-creates a credential. Responses always include credentialId (or null)."
       ]
     };
     return filtered;
@@ -768,6 +900,8 @@ export class ExchangeStore {
     const optimisticSameCurrencyTotal =
       committedTotal !== null ? Math.round((committedTotal + sameCurrencyPending) * 100) / 100 : null;
 
+    const sxCredentialsAllowed = isSxCredentialsAllowed(row);
+
     return {
       generatedAt: summary.generatedAt ?? null,
       timeZoneIdentifier: timeZone,
@@ -785,7 +919,7 @@ export class ExchangeStore {
           requestId: env.requestId,
           op: env.op,
           createdAt: env.createdAt,
-          payload: env.payload
+          payload: sanitizeSxPendingPayload(env.payload, sxCredentialsAllowed)
         }))
       }
     };
@@ -1037,19 +1171,23 @@ export class ExchangeStore {
       visibleRows.some((r) => r.app === "bx") ? this.readAppTimeZone("bx") : Promise.resolve(undefined)
     ]);
 
+    const sxCredentialsAllowed = isSxCredentialsAllowed(stateByApp.get("sx"));
+
     const items = visibleRows.map((row) => {
       const env = mapInboxRow(row);
+      const visiblePayload =
+        env.app === "sx" ? sanitizeSxPendingPayload(env.payload, sxCredentialsAllowed) : env.payload;
       let resolvedLocalTime: Record<string, unknown> | undefined;
-      if (env.app === "sx" && typeof env.payload.date === "string") {
-        const meta = localDateTimeParts(env.payload.date, sxTz);
+      if (env.app === "sx" && typeof visiblePayload.date === "string") {
+        const meta = localDateTimeParts(visiblePayload.date, sxTz);
         if (meta) {
           resolvedLocalTime = {
             ...meta,
             timeZoneIdentifier: sxTz ?? "UTC"
           };
         }
-      } else if (env.app === "bx" && typeof env.payload.recordedAt === "string") {
-        const meta = localDateTimeParts(env.payload.recordedAt, bxTz);
+      } else if (env.app === "bx" && typeof visiblePayload.recordedAt === "string") {
+        const meta = localDateTimeParts(visiblePayload.recordedAt, bxTz);
         if (meta) {
           resolvedLocalTime = {
             localDate: meta.localDate,
@@ -1064,7 +1202,7 @@ export class ExchangeStore {
         op: env.op,
         createdAt: env.createdAt,
         source: env.source,
-        payload: env.payload,
+        payload: visiblePayload,
         ...(resolvedLocalTime ? { resolvedLocalTime } : {})
       };
     });
@@ -1093,6 +1231,10 @@ export class ExchangeStore {
         .first<ReceiptRow>();
       if (receiptRow) {
         if (allowedAppSet && !allowedAppSet.has(receiptRow.app as AgentAppID)) {
+          throw new Error(`Pending request '${cleanId}' was not found in inbox.`);
+        }
+        const receiptState = await this.getAppState(receiptRow.app as AgentAppID);
+        if (!isAppRecordReadable(receiptState ?? undefined, receiptRow.op)) {
           throw new Error(`Pending request '${cleanId}' was not found in inbox.`);
         }
         const receipt = mapReceiptRow(receiptRow);
@@ -1131,12 +1273,17 @@ export class ExchangeStore {
     }
 
     await this.db.prepare("DELETE FROM inbox WHERE request_id = ?").bind(cleanId).run();
+    const rawCancelledPayload = safeJsonParse<Record<string, unknown>>(row.payload_json) ?? {};
+    const cancelledPayload =
+      app === "sx"
+        ? sanitizeSxPendingPayload(rawCancelledPayload, isSxCredentialsAllowed(state))
+        : rawCancelledPayload;
     return {
       cancelled: true,
       app,
       op: row.op,
       requestId: cleanId,
-      cancelledPayload: safeJsonParse<Record<string, unknown>>(row.payload_json) ?? {}
+      cancelledPayload
     };
   }
 
@@ -1465,6 +1612,12 @@ export class ExchangeStore {
 
     const statements: SqlPreparedStatement[] = [];
     for (const receipt of receipts) {
+      if (!receipt || typeof receipt !== "object" || Array.isArray(receipt)) {
+        throw new Error("Each receipt in 'receipts' must be a JSON object.");
+      }
+      const requestId = requireNonEmptyString(receipt.requestId, "receipt.requestId");
+      const op = requireNonEmptyString(receipt.op, "receipt.op");
+      const status = requireNonEmptyString(receipt.status, "receipt.status");
       statements.push(
         this.db
           .prepare(
@@ -1474,11 +1627,11 @@ export class ExchangeStore {
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
           )
           .bind(
-            receipt.requestId,
+            requestId,
             app,
-            receipt.op,
+            op,
             receipt.schemaVersion || SCHEMA_VERSION,
-            receipt.status,
+            status,
             receipt.processedAt || new Date().toISOString(),
             receipt.recordId ?? null,
             receipt.stableId ?? null,
@@ -1489,7 +1642,7 @@ export class ExchangeStore {
           )
       );
       statements.push(
-        this.db.prepare("DELETE FROM inbox WHERE request_id = ? AND app = ?").bind(receipt.requestId, app)
+        this.db.prepare("DELETE FROM inbox WHERE request_id = ? AND app = ?").bind(requestId, app)
       );
     }
 
@@ -1498,8 +1651,21 @@ export class ExchangeStore {
   }
 
   async putAppSnapshot(app: AgentAppID, body: SnapshotUploadBody): Promise<Record<string, unknown>> {
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      throw new Error("Snapshot body must be a JSON object.");
+    }
+    const bundleId = requireNonEmptyString(body.bundleId, "bundleId");
+    const appVersion = requireNonEmptyString(body.appVersion, "appVersion");
     if (!VALID_PERMISSIONS.has(body.permission)) {
       throw new Error(`Invalid permission tier '${body.permission}'.`);
+    }
+    if (body.policy !== undefined) {
+      if (!body.policy || typeof body.policy !== "object" || Array.isArray(body.policy)) {
+        throw new Error("'policy' must be a JSON object.");
+      }
+      if (!Array.isArray(body.policy.allowedDomains)) {
+        throw new Error("'policy.allowedDomains' must be an array of domain names.");
+      }
     }
 
     const existing = await this.getAppState(app);
@@ -1530,8 +1696,8 @@ export class ExchangeStore {
         )
         .bind(
           app,
-          body.bundleId,
-          body.appVersion,
+          bundleId,
+          appVersion,
           body.permission,
           policyJson,
           JSON.stringify(body.capabilities ?? []),
@@ -1543,8 +1709,11 @@ export class ExchangeStore {
     ];
 
     if (readRevoked) {
-      // Clears read-only snapshot datasets in app_dataset while preserving csteix_wuxu rows.
-      statements.push(this.db.prepare("DELETE FROM app_dataset WHERE app = ?").bind(app));
+      // Clears read-only snapshot datasets in app_dataset and app_dataset_chunks while preserving csteix_wuxu rows.
+      statements.push(
+        this.db.prepare("DELETE FROM app_dataset WHERE app = ?").bind(app),
+        this.db.prepare("DELETE FROM app_dataset_chunks WHERE app = ?").bind(app)
+      );
     } else if (body.datasets && typeof body.datasets === "object") {
       for (const [domain, value] of Object.entries(body.datasets)) {
         // Wuxu articles live in dedicated csteix_wuxu table, never in app_dataset.
@@ -1553,20 +1722,13 @@ export class ExchangeStore {
           !resolvedPolicy ||
           resolvedPolicy.allowedDomains.includes(domain) ||
           (domain === "exercises" && resolvedPolicy.allowedDomains.includes("workouts"));
-        if (value === null || !domainAllowed) {
+        if (value === null || value === undefined || !domainAllowed) {
           statements.push(
-            this.db.prepare("DELETE FROM app_dataset WHERE app = ? AND domain = ?").bind(app, domain)
+            this.db.prepare("DELETE FROM app_dataset WHERE app = ? AND domain = ?").bind(app, domain),
+            this.db.prepare("DELETE FROM app_dataset_chunks WHERE app = ? AND domain = ?").bind(app, domain)
           );
         } else {
-          const count = Array.isArray(value) ? value.length : 1;
-          statements.push(
-            this.db
-              .prepare(
-                `INSERT OR REPLACE INTO app_dataset (app, domain, payload_json, record_count, updated_at)
-                 VALUES (?, ?, ?, ?, ?)`
-              )
-              .bind(app, domain, JSON.stringify(value), count, now)
-          );
+          statements.push(...this.buildDatasetWriteStatements(app, domain, value, now));
         }
       }
     }
@@ -1581,7 +1743,8 @@ export class ExchangeStore {
       for (const row of existingDomains) {
         if (!allowedSet.has(row.domain)) {
           statements.push(
-            this.db.prepare("DELETE FROM app_dataset WHERE app = ? AND domain = ?").bind(app, row.domain)
+            this.db.prepare("DELETE FROM app_dataset WHERE app = ? AND domain = ?").bind(app, row.domain),
+            this.db.prepare("DELETE FROM app_dataset_chunks WHERE app = ? AND domain = ?").bind(app, row.domain)
           );
         }
       }
@@ -1601,25 +1764,53 @@ export class ExchangeStore {
   }
 
   async putAppDatasetDomain(app: AgentAppID, domain: string, data: unknown | null): Promise<Record<string, unknown>> {
+    if (app === "csteix" && domain === "wuxu") {
+      throw new Error(
+        "Domain 'wuxu' for 'csteix' is stored in the dedicated csteix_wuxu table; use /sync/csteix/wuxu or /sync/csteix/wuxu/import instead."
+      );
+    }
+
     const now = new Date().toISOString();
-    if (data === null) {
-      await this.db.prepare("DELETE FROM app_dataset WHERE app = ? AND domain = ?").bind(app, domain).run();
+    const state = await this.getAppState(app);
+    if (state) {
+      const policy = parsePolicyFromRow(state);
+      const readRevoked = state.permission === "disabled" || !policy.allowRead;
+      const domainAllowed =
+        !readRevoked &&
+        (policy.allowedDomains.includes(domain) ||
+          (domain === "exercises" && policy.allowedDomains.includes("workouts")));
+      if (!domainAllowed) {
+        await this.db.batch([
+          this.db.prepare("DELETE FROM app_dataset WHERE app = ? AND domain = ?").bind(app, domain),
+          this.db.prepare("DELETE FROM app_dataset_chunks WHERE app = ? AND domain = ?").bind(app, domain)
+        ]);
+        if (data === null || data === undefined) {
+          return { schemaVersion: SCHEMA_VERSION, app, domain, deleted: true, updatedAt: now };
+        }
+        throw new Error(
+          readRevoked
+            ? `App '${app}' read access is disabled; refusing to store dataset '${domain}'.`
+            : `Domain '${domain}' is disabled by user policy in ${app.toUpperCase()}; refusing to store dataset.`
+        );
+      }
+    }
+
+    if (data === null || data === undefined) {
+      await this.db.batch([
+        this.db.prepare("DELETE FROM app_dataset WHERE app = ? AND domain = ?").bind(app, domain),
+        this.db.prepare("DELETE FROM app_dataset_chunks WHERE app = ? AND domain = ?").bind(app, domain)
+      ]);
       return { schemaVersion: SCHEMA_VERSION, app, domain, deleted: true, updatedAt: now };
     }
     const count = Array.isArray(data) ? data.length : 1;
-    await this.db
-      .prepare(
-        `INSERT OR REPLACE INTO app_dataset (app, domain, payload_json, record_count, updated_at)
-         VALUES (?, ?, ?, ?, ?)`
-      )
-      .bind(app, domain, JSON.stringify(data), count, now)
-      .run();
+    await this.db.batch(this.buildDatasetWriteStatements(app, domain, data, now));
     return { schemaVersion: SCHEMA_VERSION, app, domain, recordCount: count, updatedAt: now };
   }
 
   async wipeAppData(app: AgentAppID): Promise<Record<string, unknown>> {
     const wipedAt = new Date().toISOString();
     const statements: SqlPreparedStatement[] = [
+      this.db.prepare("DELETE FROM app_dataset_chunks WHERE app = ?").bind(app),
       this.db.prepare("DELETE FROM app_dataset WHERE app = ?").bind(app),
       this.db.prepare("DELETE FROM inbox WHERE app = ?").bind(app),
       this.db.prepare("DELETE FROM receipts WHERE app = ?").bind(app),

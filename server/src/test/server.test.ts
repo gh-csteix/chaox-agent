@@ -86,7 +86,7 @@ test("supports full SX + BX snapshot upload, MCP tools/resources/prompts, optimi
   const bxSnap = await callJson(env, "/sync/bx/snapshot", {
     method: "PUT",
     body: {
-      bundleId: "com.lizhichao.bx",
+      bundleId: "ai.chaox.bx",
       appVersion: "1.0",
       permission: "appendOnly",
       capabilities: ["catalog", "summary", "record_food", "record_skin", "record_toilet"],
@@ -245,7 +245,7 @@ test("preserves snapshot when updating permission to readOnly and blocks writes"
   await callJson(env, "/sync/bx/snapshot", {
     method: "PUT",
     body: {
-      bundleId: "com.lizhichao.bx",
+      bundleId: "ai.chaox.bx",
       appVersion: "1.0",
       permission: "appendOnly",
       capabilities: ["summary", "record_food"],
@@ -258,7 +258,7 @@ test("preserves snapshot when updating permission to readOnly and blocks writes"
   await callJson(env, "/sync/bx/snapshot", {
     method: "PUT",
     body: {
-      bundleId: "com.lizhichao.bx",
+      bundleId: "ai.chaox.bx",
       appVersion: "1.0",
       permission: "readOnly",
       capabilities: ["summary"]
@@ -301,7 +301,7 @@ test("supports full BX sleep/workouts/food/skin/toilet reads, CRUD, workout Heal
   await callJson(env, "/sync/bx/snapshot", {
     method: "PUT",
     body: {
-      bundleId: "com.lizhichao.bx",
+      bundleId: "ai.chaox.bx",
       appVersion: "1.1",
       permission: "readWrite",
       policy: {
@@ -446,7 +446,7 @@ test("supports full BX sleep/workouts/food/skin/toilet reads, CRUD, workout Heal
   await callJson(env, "/sync/bx/snapshot", {
     method: "PUT",
     body: {
-      bundleId: "com.lizhichao.bx",
+      bundleId: "ai.chaox.bx",
       appVersion: "1.1",
       permission: "readWrite",
       policy: {
@@ -1169,17 +1169,51 @@ test("exposes complete SX MCP tool & property descriptions and fieldGuide in sx_
 
   const recordExpense = tools.find((t) => t.name === "sx_record_expense");
   assert.ok(recordExpense?.inputSchema?.properties?.hour);
+  assert.ok(recordExpense?.inputSchema?.properties?.skipCredential);
   assert.match(recordExpense.description ?? "", /YYYY-MM-DD-HH/);
+  assert.match(recordExpense.description ?? "", /auto-binds.*1 linked credential/i);
+  assert.match(recordExpense.description ?? "", /credentialSelectionRequired=true/);
+  assert.match(recordExpense.description ?? "", /NEVER create a new credential/i);
+
+  const recordIncome = tools.find((t) => t.name === "sx_record_income");
+  assert.ok(recordIncome?.inputSchema?.properties?.skipCredential);
+  assert.match(recordIncome?.description ?? "", /auto-binds.*1 linked credential/i);
+  assert.match(recordIncome?.description ?? "", /NEVER create a new credential/i);
+
+  const initRes = await callJson(env, "/mcp", {
+    method: "POST",
+    body: { jsonrpc: "2.0", id: 701, method: "initialize", params: {} }
+  });
+  const initInstructions = (initRes.data.result as { instructions: string }).instructions;
+  assert.match(initInstructions, /auto-binds if the project has 1 linked credential/i);
+  assert.match(initInstructions, /credentialSelectionRequired=true/);
+
+  const skillRes = await callJson(env, "/mcp", {
+    method: "POST",
+    body: { jsonrpc: "2.0", id: 702, method: "resources/read", params: { uri: "chaox://guide/skill" } }
+  });
+  const skillText = (skillRes.data.result as { contents: Array<{ text: string }> }).contents[0].text;
+  assert.match(skillText, /skipCredential/);
+  assert.match(skillText, /Never auto-create credentials/);
 
   const catalogRes = await callJson(env, "/mcp", {
     method: "POST",
     body: { jsonrpc: "2.0", id: 71, method: "tools/call", params: { name: "sx_get_catalog", arguments: {} } }
   });
   const catalogData = JSON.parse(((catalogRes.data.result as { content: Array<{ text: string }> }).content[0]).text) as {
-    fieldGuide?: { expenseDisplayDateFormat?: string; commonPitfalls?: string[] };
+    fieldGuide?: {
+      expenseDisplayDateFormat?: string;
+      expenseWriteFields?: { credentialId?: string; skipCredential?: string };
+      commonPitfalls?: string[];
+    };
   };
   assert.match(catalogData.fieldGuide?.expenseDisplayDateFormat ?? "", /YYYY-MM-DD-HH/);
-  assert.ok((catalogData.fieldGuide?.commonPitfalls?.length ?? 0) >= 4);
+  assert.match(catalogData.fieldGuide?.expenseWriteFields?.credentialId ?? "", /1 linked credential/i);
+  assert.ok(catalogData.fieldGuide?.expenseWriteFields?.skipCredential);
+  assert.ok((catalogData.fieldGuide?.commonPitfalls?.length ?? 0) >= 5);
+  assert.ok(
+    catalogData.fieldGuide?.commonPitfalls?.some((p) => /Credential binding rule/i.test(p))
+  );
 });
 
 test("resolves SX expense hour formats in device timezone, accepts note/notes alias, and enriches sx_list_expenses", async () => {
@@ -1757,7 +1791,7 @@ test("enforces SX summary period scoping, BX timezone-aware boundaries & recorde
   await callJson(env, "/sync/bx/snapshot", {
     method: "PUT",
     body: {
-      bundleId: "com.lizhichao.bx",
+      bundleId: "ai.chaox.bx",
       appVersion: "1.2.0",
       permission: "readWrite",
       policy: {
@@ -1893,7 +1927,7 @@ test("supports chaox_list_pending, chaox_cancel_pending, in-place pending edits,
   await callJson(env, "/sync/bx/snapshot", {
     method: "PUT",
     body: {
-      bundleId: "com.lizhichao.bx",
+      bundleId: "ai.chaox.bx",
       appVersion: "1.2.0",
       permission: "appendOnly",
       policy: {
@@ -2145,7 +2179,7 @@ test("computes pre-pagination aggregates, validates projectName with fuzzy sugge
   await callJson(env, "/sync/bx/snapshot", {
     method: "PUT",
     body: {
-      bundleId: "com.lizhichao.bx",
+      bundleId: "ai.chaox.bx",
       appVersion: "1.2.0",
       permission: "readWrite",
       policy: {
@@ -2263,7 +2297,7 @@ test("exposes chaox_get_briefing, chaox_get_preferences/chaox_update_preferences
   await callJson(env, "/sync/bx/snapshot", {
     method: "PUT",
     body: {
-      bundleId: "com.lizhichao.bx",
+      bundleId: "ai.chaox.bx",
       appVersion: "1.2.0",
       permission: "disabled",
       policy: { allowRead: false, allowCreate: false, allowUpdate: false, allowDelete: false, allowedDomains: ["food"], consentAcknowledged: true },
@@ -2308,4 +2342,377 @@ test("exposes chaox_get_briefing, chaox_get_preferences/chaox_update_preferences
     body: { jsonrpc: "2.0", id: 1305, method: "tools/call", params: { name: "sx_record_expense", arguments: { amount: 10, projectName: "EatingDrinkingOut" } } }
   });
   assert.equal((blockedCall.data.result as { isError?: boolean }).isError, true);
+});
+
+test("enforces SX default credential binding (1 auto-bind, N prompt, 0 unbound), skipCredential, pending overlay, and scope boundaries", async () => {
+  const env = makeEnv();
+  const callTool = async (id: number, name: string, args: Record<string, unknown>) => {
+    const res = await callJson(env, "/mcp", {
+      method: "POST",
+      body: { jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } }
+    });
+    const result = res.data.result as { isError?: boolean; content: Array<{ text: string }> };
+    const text = result.content[0]?.text ?? "";
+    let parsed: Record<string, unknown> = {};
+    try {
+      parsed = JSON.parse(text) as Record<string, unknown>;
+    } catch {
+      parsed = { text };
+    }
+    return { isError: result.isError, parsed, text };
+  };
+
+  const baseProjects = [
+    { id: "1", name: "SingleCred", currency: "USD", supportsExpense: true, supportsIncome: true },
+    { id: "2", name: "MultiCred", currency: "USD", supportsExpense: true, supportsIncome: true },
+    { id: "3", name: "NoCred", currency: "CNY", supportsExpense: true, supportsIncome: true }
+  ];
+
+  const baseCredentials = [
+    {
+      id: 7,
+      username: "solo@example.com",
+      type: "Login",
+      website: "solo.example",
+      issuer: "Solo",
+      linkCount: 1,
+      links: [{ projectId: 1, projectName: "SingleCred", startDate: "2026-11-01T00:00:00Z", hasStartDate: true, isAutoRenew: false, renewalHour: 0, renewalWeekdays: 127 }]
+    },
+    {
+      id: 8,
+      username: "alpha@example.com",
+      type: "Login",
+      website: "multi.example",
+      issuer: "Alpha",
+      linkCount: 1,
+      links: [{ projectId: 2, projectName: "MultiCred", startDate: "2026-11-01T00:00:00Z", hasStartDate: true, isAutoRenew: false, renewalHour: 0, renewalWeekdays: 127 }]
+    },
+    {
+      id: 9,
+      username: "beta@example.com",
+      type: "Card",
+      website: "multi.example",
+      issuer: "Beta",
+      linkCount: 1,
+      links: [{ projectId: 2, projectName: "MultiCred", startDate: "2026-11-01T00:00:00Z", hasStartDate: true, isAutoRenew: false, renewalHour: 0, renewalWeekdays: 127 }]
+    }
+  ];
+
+  await callJson(env, "/sync/sx/snapshot", {
+    method: "PUT",
+    body: {
+      bundleId: "ai.chaox.sx",
+      appVersion: "1.2.0",
+      permission: "readWrite",
+      policy: {
+        allowRead: true,
+        allowCreate: true,
+        allowUpdate: true,
+        allowDelete: true,
+        allowedDomains: ["projects", "expenses", "incomes", "tags", "slogans", "credentials"],
+        consentAcknowledged: true
+      },
+      capabilities: ["projects", "expenses", "incomes", "tags", "slogans", "credentials"],
+      catalog: {
+        timeZoneIdentifier: "Asia/Shanghai",
+        summaryCurrency: "CNY",
+        supportedCurrencies: ["CNY", "USD"],
+        projects: baseProjects,
+        tags: []
+      },
+      summary: { summaryCurrency: "CNY", expense: {}, income: {} },
+      datasets: {
+        projects: baseProjects.map((p) => ({
+          id: Number(p.id),
+          name: p.name,
+          price: 0,
+          currency: p.currency,
+          cycle: "irregular",
+          priceType: "floating",
+          projectType: "nonRenewal",
+          cashFlowSides: "both",
+          supportsExpense: true,
+          supportsIncome: true,
+          startDate: "2026-11-01T00:00:00Z",
+          isAutoRenew: false,
+          notes: "",
+          expenseCount: 0,
+          incomeCount: 0,
+          credentialLinkCount: p.id === "1" ? 1 : p.id === "2" ? 2 : 0,
+          deletable: p.id === "3"
+        })),
+        expenses: [],
+        incomes: [],
+        tags: [],
+        slogans: [],
+        credentials: baseCredentials
+      }
+    }
+  });
+
+  // 1) Single linked credential -> auto-binds credentialId=7 and returns boundCredential metadata.
+  const singleAuto = await callTool(1401, "sx_record_expense", {
+    amount: 12,
+    projectName: "SingleCred",
+    requestId: "cred-auto-1"
+  });
+  assert.equal(singleAuto.isError, undefined);
+  assert.equal(singleAuto.parsed.queued, true);
+  assert.equal(singleAuto.parsed.credentialId, 7);
+  assert.equal(singleAuto.parsed.credentialResolution, "auto_bound");
+  assert.deepEqual(singleAuto.parsed.boundCredential, {
+    id: 7,
+    username: "solo@example.com",
+    type: "Login",
+    website: "solo.example",
+    issuer: "Solo"
+  });
+  assert.equal((singleAuto.parsed.normalizedPayload as Record<string, unknown>).credentialId, 7);
+
+  // Verify visible in sx_list_expenses and /sync/sx/inbox.
+  const listedAfterAuto = await callTool(1402, "sx_list_expenses", { projectName: "SingleCred" });
+  const listItems = listedAfterAuto.parsed.items as Array<{ credentialId?: number; pendingRequestId?: string }>;
+  assert.equal(listItems[0].credentialId, 7);
+
+  // 2) Explicit skipCredential=true and credentialId=null on single-credential project both leave unbound.
+  const skipSingle = await callTool(1403, "sx_record_expense", {
+    amount: 13,
+    projectName: "SingleCred",
+    skipCredential: true,
+    requestId: "cred-skip-1"
+  });
+  assert.equal(skipSingle.isError, undefined);
+  assert.equal(skipSingle.parsed.queued, true);
+  assert.equal(skipSingle.parsed.credentialId, null);
+  assert.equal(skipSingle.parsed.credentialResolution, "explicit_none");
+  assert.equal((skipSingle.parsed.normalizedPayload as Record<string, unknown>).credentialId, undefined);
+
+  const nullSingle = await callTool(1404, "sx_record_expense", {
+    amount: 14,
+    projectName: "SingleCred",
+    credentialId: null,
+    requestId: "cred-null-1"
+  });
+  assert.equal(nullSingle.isError, undefined);
+  assert.equal(nullSingle.parsed.queued, true);
+  assert.equal(nullSingle.parsed.credentialId, null);
+  assert.equal(nullSingle.parsed.credentialResolution, "explicit_none");
+
+  // 3) Multiple linked credentials -> pauses with queued=false, credentialSelectionRequired=true, candidates, and does NOT enqueue.
+  const multiPrompt = await callTool(1405, "sx_record_expense", {
+    amount: 20,
+    projectName: "MultiCred",
+    requestId: "cred-multi-retry"
+  });
+  assert.equal(multiPrompt.isError, undefined);
+  assert.equal(multiPrompt.parsed.queued, false);
+  assert.equal(multiPrompt.parsed.credentialSelectionRequired, true);
+  assert.equal(multiPrompt.parsed.credentialResolution, "selection_required");
+  assert.equal(multiPrompt.parsed.credentialId, null);
+  assert.equal(multiPrompt.parsed.op, "record_expense");
+  const candidates = multiPrompt.parsed.credentialCandidates as Array<{ id: number; username: string }>;
+  assert.deepEqual(
+    candidates.map((c) => c.id),
+    [8, 9]
+  );
+  assert.match(String(multiPrompt.parsed.selectionPrompt), /alpha@example\.com/);
+  assert.match(String(multiPrompt.parsed.selectionPrompt), /beta@example\.com/);
+  assert.match(String(multiPrompt.parsed.selectionPrompt), /Do NOT create a new credential/i);
+
+  const inboxCheck1 = await callJson(env, "/sync/sx/inbox");
+  assert.equal(
+    (inboxCheck1.data.envelopes as Array<{ requestId: string }>).some((e) => e.requestId === "cred-multi-retry"),
+    false
+  );
+
+  // 4) Follow-up with chosen credentialId=9 and same requestId queues cleanly.
+  const multiChosen = await callTool(1406, "sx_record_expense", {
+    amount: 20,
+    projectName: "MultiCred",
+    credentialId: 9,
+    requestId: "cred-multi-retry"
+  });
+  assert.equal(multiChosen.isError, undefined);
+  assert.equal(multiChosen.parsed.queued, true);
+  assert.equal(multiChosen.parsed.credentialId, 9);
+  assert.equal(multiChosen.parsed.credentialResolution, "explicit");
+  assert.equal((multiChosen.parsed.boundCredential as { id: number }).id, 9);
+
+  // 4b) Idempotent retry with same requestId returns duplicateInInbox=true with stored credentialId instead of prompting again.
+  const retryMulti = await callTool(1407, "sx_record_expense", {
+    amount: 20,
+    projectName: "MultiCred",
+    requestId: "cred-multi-retry"
+  });
+  assert.equal(retryMulti.isError, undefined);
+  assert.equal(retryMulti.parsed.queued, true);
+  assert.equal(retryMulti.parsed.duplicateInInbox, true);
+  assert.equal(retryMulti.parsed.credentialId, 9);
+
+  // 4c) Follow-up with skipCredential=true on multi-credential project queues unbound.
+  const multiSkipped = await callTool(1408, "sx_record_expense", {
+    amount: 21,
+    projectName: "MultiCred",
+    skipCredential: true,
+    requestId: "cred-multi-skip"
+  });
+  assert.equal(multiSkipped.isError, undefined);
+  assert.equal(multiSkipped.parsed.queued, true);
+  assert.equal(multiSkipped.parsed.credentialId, null);
+  assert.equal(multiSkipped.parsed.credentialResolution, "explicit_none");
+
+  // 5) Zero linked credentials -> queues unbound and does NOT create any credential.
+  const noCred = await callTool(1409, "sx_record_expense", {
+    amount: 30,
+    projectName: "NoCred",
+    requestId: "cred-none-1"
+  });
+  assert.equal(noCred.isError, undefined);
+  assert.equal(noCred.parsed.queued, true);
+  assert.equal(noCred.parsed.credentialId, null);
+  assert.equal(noCred.parsed.credentialResolution, "none");
+  const inboxCheck2 = await callJson(env, "/sync/sx/inbox");
+  assert.equal(
+    (inboxCheck2.data.envelopes as Array<{ op: string }>).some((e) => e.op === "create_credential"),
+    false
+  );
+
+  // 6) Invalid explicit credentialId, conflict, and non-numeric credentialId return errors.
+  const wrongProjCred = await callTool(1410, "sx_record_expense", {
+    amount: 10,
+    projectName: "MultiCred",
+    credentialId: 7
+  });
+  assert.equal(wrongProjCred.isError, true);
+  assert.match(wrongProjCred.text, /#8/);
+  assert.match(wrongProjCred.text, /#9/);
+
+  const noCredWrongExplicit = await callTool(1411, "sx_record_expense", {
+    amount: 10,
+    projectName: "NoCred",
+    credentialId: 7
+  });
+  assert.equal(noCredWrongExplicit.isError, true);
+  assert.match(noCredWrongExplicit.text, /no linked credentials/i);
+
+  const conflictCred = await callTool(1412, "sx_record_expense", {
+    amount: 10,
+    projectName: "SingleCred",
+    credentialId: 7,
+    skipCredential: true
+  });
+  assert.equal(conflictCred.isError, true);
+  assert.match(conflictCred.text, /Cannot provide both/);
+
+  const badTypeCred = await callTool(1413, "sx_record_expense", {
+    amount: 10,
+    projectName: "SingleCred",
+    credentialId: "not-a-number"
+  });
+  assert.equal(badTypeCred.isError, true);
+  assert.match(badTypeCred.text, /positive integer/);
+
+  // 9) sx_record_income parity: 1 auto-bind, N selection prompt, 0 unbound.
+  const incAuto = await callTool(1414, "sx_record_income", {
+    amount: 500,
+    projectName: "SingleCred",
+    requestId: "inc-auto-1"
+  });
+  assert.equal(incAuto.isError, undefined);
+  assert.equal(incAuto.parsed.queued, true);
+  assert.equal(incAuto.parsed.credentialId, 7);
+  assert.equal(incAuto.parsed.credentialResolution, "auto_bound");
+
+  const incMulti = await callTool(1415, "sx_record_income", {
+    amount: 600,
+    projectName: "MultiCred",
+    requestId: "inc-multi-1"
+  });
+  assert.equal(incMulti.isError, undefined);
+  assert.equal(incMulti.parsed.queued, false);
+  assert.equal(incMulti.parsed.credentialSelectionRequired, true);
+  assert.equal(incMulti.parsed.op, "record_income");
+
+  const incNone = await callTool(1416, "sx_record_income", {
+    amount: 700,
+    projectName: "NoCred",
+    requestId: "inc-none-1"
+  });
+  assert.equal(incNone.isError, undefined);
+  assert.equal(incNone.parsed.queued, true);
+  assert.equal(incNone.parsed.credentialId, null);
+  assert.equal(incNone.parsed.credentialResolution, "none");
+
+  // 8) Pending overlay: link_credential pushes SingleCred from 1 -> 2 (triggers selection prompt);
+  //    unlink_credential drops MultiCred from 2 -> 1 (auto-binds remaining #9).
+  await callTool(1417, "sx_link_credential", { credentialId: 8, projectId: 1 });
+  const singleNowMulti = await callTool(1418, "sx_record_expense", {
+    amount: 15,
+    projectName: "SingleCred"
+  });
+  assert.equal(singleNowMulti.parsed.queued, false);
+  assert.equal(singleNowMulti.parsed.credentialSelectionRequired, true);
+  assert.deepEqual(
+    (singleNowMulti.parsed.credentialCandidates as Array<{ id: number }>).map((c) => c.id),
+    [8, 7]
+  );
+
+  await callTool(1419, "sx_unlink_credential", { credentialId: 8, projectId: 2 });
+  const multiNowSingle = await callTool(1420, "sx_record_expense", {
+    amount: 16,
+    projectName: "MultiCred",
+    requestId: "cred-after-unlink"
+  });
+  assert.equal(multiNowSingle.parsed.queued, true);
+  assert.equal(multiNowSingle.parsed.credentialId, 9);
+  assert.equal(multiNowSingle.parsed.credentialResolution, "auto_bound");
+
+  // 11) Moving a queued pending expense across projects clears stale credentialId.
+  const movedPending = await callTool(1421, "sx_update_expense", {
+    pendingRequestId: "cred-auto-1",
+    projectName: "NoCred"
+  });
+  assert.equal(movedPending.isError, undefined);
+  assert.equal(
+    (movedPending.parsed.normalizedPayload as Record<string, unknown>).credentialId,
+    undefined
+  );
+  assert.equal(
+    (movedPending.parsed.normalizedPayload as Record<string, unknown>).projectName,
+    "NoCred"
+  );
+
+  // 7) Disabling 'credentials' domain stops auto-binding and reports credentials_scope_disabled.
+  await callJson(env, "/sync/sx/snapshot", {
+    method: "PUT",
+    body: {
+      bundleId: "ai.chaox.sx",
+      appVersion: "1.2.0",
+      permission: "readWrite",
+      policy: {
+        allowRead: true,
+        allowCreate: true,
+        allowUpdate: true,
+        allowDelete: true,
+        allowedDomains: ["projects", "expenses", "incomes", "tags", "slogans"],
+        consentAcknowledged: true
+      },
+      capabilities: ["projects", "expenses", "incomes", "tags", "slogans"],
+      catalog: {
+        timeZoneIdentifier: "Asia/Shanghai",
+        summaryCurrency: "CNY",
+        supportedCurrencies: ["CNY", "USD"],
+        projects: baseProjects
+      }
+    }
+  });
+  const scopeDisabledRes = await callTool(1422, "sx_record_expense", {
+    amount: 25,
+    projectName: "SingleCred",
+    requestId: "cred-scope-disabled"
+  });
+  assert.equal(scopeDisabledRes.isError, undefined);
+  assert.equal(scopeDisabledRes.parsed.queued, true);
+  assert.equal(scopeDisabledRes.parsed.credentialId, null);
+  assert.equal(scopeDisabledRes.parsed.credentialResolution, "credentials_scope_disabled");
 });

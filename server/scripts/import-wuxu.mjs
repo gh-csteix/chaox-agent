@@ -314,8 +314,8 @@ function parseCliArgs(argv) {
       opts.url = argv[++i];
     } else if (arg === "--help" || arg === "-h") {
       console.log(
-        "Usage: node scripts/import-wuxu.mjs [--dir <chaoxwuxu-repo>] [--url <server-url>] [--dry-run]\n" +
-          "Environment: CHAOX_AUTH_TOKEN (required without --dry-run), CHAOX_SERVER_URL (or CHAOX_WORKER_URL)"
+        "Usage: node scripts/import-wuxu.mjs [--dir <wuxu-archive-dir>] [--url <server-url>] [--dry-run]\n" +
+          "Environment: CHAOX_SYNC_TOKEN (or legacy CHAOX_AUTH_TOKEN; required without --dry-run), CHAOX_SERVER_URL (or CHAOX_WORKER_URL)"
       );
       process.exit(0);
     } else if (!arg.startsWith("-") && !opts.dir) {
@@ -359,9 +359,9 @@ async function main() {
   if (!opts.url) {
     throw new Error("Missing server URL. Pass --url https://<your-server> or set CHAOX_SERVER_URL.");
   }
-  const token = process.env.CHAOX_AUTH_TOKEN?.trim();
+  const token = process.env.CHAOX_SYNC_TOKEN?.trim() || process.env.CHAOX_AUTH_TOKEN?.trim();
   if (!token) {
-    throw new Error("Missing CHAOX_AUTH_TOKEN environment variable.");
+    throw new Error("Missing CHAOX_SYNC_TOKEN (or legacy CHAOX_AUTH_TOKEN) environment variable.");
   }
 
   const endpoint = `${normalizeServerBaseUrl(opts.url)}/sync/csteix/wuxu/import`;

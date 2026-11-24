@@ -21,12 +21,13 @@ services:
       CHAOX_MCP_READONLY_TOKEN: "${CHAOX_MCP_READONLY_TOKEN:-}"
       CHAOX_ALLOWED_ORIGINS: "${CHAOX_ALLOWED_ORIGINS:-}"
       CHAOX_ALLOW_MCP_PREFERENCES_WRITE: "${CHAOX_ALLOW_MCP_PREFERENCES_WRITE:-}"
-      CHAOX_TRUST_PROXY: "${CHAOX_TRUST_PROXY:-false}"
+      CHAOX_TRUST_PROXY: "${CHAOX_TRUST_PROXY:-true}"
+      CHAOX_MAX_BODY_BYTES: "${CHAOX_MAX_BODY_BYTES:-20971520}"
       CHAOX_DB_PATH: "${CHAOX_DB_PATH:-/data/chaox-agent.sqlite}"
       CHAOX_BACKEND_MODE: "${CHAOX_BACKEND_MODE:-sqlite}"
       CHAOX_SERVER_NAME: "${CHAOX_SERVER_NAME:-chaox-agent-server}"
     volumes:
-      - ./data:/data
+      - chaox_data:/data
 
   # Optional automatic Let's Encrypt HTTPS reverse proxy on VPS:
   # 1. Copy Caddyfile.example -> Caddyfile and set your domain
@@ -47,5 +48,6 @@ services:
       - caddy_config:/config
 
 volumes:
+  chaox_data:
   caddy_data:
   caddy_config:

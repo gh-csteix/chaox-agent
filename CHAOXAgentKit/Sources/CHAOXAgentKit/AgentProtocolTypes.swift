@@ -750,6 +750,28 @@ public struct AgentRemoteSnapshotRequest: Encodable, Sendable {
     }
 }
 
+public struct AgentWuxuCoupletDTO: Codable, Sendable, Equatable {
+    public var id: String
+    public var dimension: String
+    public var zh: String
+    public var en: String
+    public var sourceLine: String?
+
+    public init(
+        id: String,
+        dimension: String,
+        zh: String,
+        en: String,
+        sourceLine: String? = nil
+    ) {
+        self.id = id
+        self.dimension = dimension
+        self.zh = zh
+        self.en = en
+        self.sourceLine = sourceLine
+    }
+}
+
 public struct AgentWuxuArticleDTO: Codable, Sendable, Equatable {
     public var id: String
     public var slug: String
@@ -765,6 +787,25 @@ public struct AgentWuxuArticleDTO: Codable, Sendable, Equatable {
     public var deletedAt: Date?
     public var createdAt: Date
     public var updatedAt: Date
+    public var couplets: [AgentWuxuCoupletDTO]
+
+    public enum CodingKeys: String, CodingKey {
+        case id
+        case slug
+        case title
+        case titleEn
+        case dimensions
+        case writtenAt
+        case timezone
+        case bodyZh
+        case bodyEn
+        case rawNotes
+        case revision
+        case deletedAt
+        case createdAt
+        case updatedAt
+        case couplets
+    }
 
     public init(
         id: String,
@@ -780,7 +821,8 @@ public struct AgentWuxuArticleDTO: Codable, Sendable, Equatable {
         revision: Int = 1,
         deletedAt: Date? = nil,
         createdAt: Date,
-        updatedAt: Date
+        updatedAt: Date,
+        couplets: [AgentWuxuCoupletDTO] = []
     ) {
         self.id = id
         self.slug = slug
@@ -796,6 +838,26 @@ public struct AgentWuxuArticleDTO: Codable, Sendable, Equatable {
         self.deletedAt = deletedAt
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.couplets = couplets
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(String.self, forKey: .id)
+        self.slug = try container.decode(String.self, forKey: .slug)
+        self.title = try container.decode(String.self, forKey: .title)
+        self.titleEn = try container.decodeIfPresent(String.self, forKey: .titleEn)
+        self.dimensions = try container.decode([String].self, forKey: .dimensions)
+        self.writtenAt = try container.decode(Date.self, forKey: .writtenAt)
+        self.timezone = try container.decode(String.self, forKey: .timezone)
+        self.bodyZh = try container.decode(String.self, forKey: .bodyZh)
+        self.bodyEn = try container.decodeIfPresent(String.self, forKey: .bodyEn)
+        self.rawNotes = try container.decodeIfPresent(String.self, forKey: .rawNotes)
+        self.revision = try container.decode(Int.self, forKey: .revision)
+        self.deletedAt = try container.decodeIfPresent(Date.self, forKey: .deletedAt)
+        self.createdAt = try container.decode(Date.self, forKey: .createdAt)
+        self.updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+        self.couplets = try container.decodeIfPresent([AgentWuxuCoupletDTO].self, forKey: .couplets) ?? []
     }
 }
 

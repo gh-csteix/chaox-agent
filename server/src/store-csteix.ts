@@ -20,6 +20,8 @@ import {
   CsteixMarkRecord,
   CsteixMeditationRecord,
   CsteixWuxuArticle,
+  CsteixWuxuCouplet,
+  CsteixWuxuCoupletInput,
   CsteixWuxuImportItem,
   CsteixWuxuSummaryItem,
   PermissionAction,
@@ -81,6 +83,7 @@ export interface CsteixWuxuRow {
   title: string;
   title_en: string | null;
   dimensions_json: string;
+  couplets_json?: string | null;
   written_at: string;
   timezone: string;
   body_zh: string;
@@ -246,6 +249,7 @@ type CsteixWuxuMetaRow = Pick<
   | "title"
   | "title_en"
   | "dimensions_json"
+  | "couplets_json"
   | "written_at"
   | "timezone"
   | "revision"
@@ -256,6 +260,283 @@ type CsteixWuxuMetaRow = Pick<
   has_english?: number;
   has_raw_notes?: number;
 };
+
+const MAX_COUPLETS_PER_ARTICLE = 4;
+const EMOJI_PATTERN = /[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\uFE0F\u200D]/u;
+const ZH_MARKDOWN_PATTERN = /[*_`#>]/;
+const ZH_PUNCTUATION_PATTERN = /[,.!?;:，。！？；：、"'“”‘’()（）《》【】—–\p{P}\p{S}]/u;
+const EN_HALF_PATTERN = /^[A-Z]+(?: [A-Z]+)*$/;
+const IX_FORBIDDEN_TERMS_PATTERN = /\b(SEEK|SEEKING|EXPLORE|EXPLORING|QUEST|PURSUIT)\b/;
+
+function dedupeAdjacentChars(part: string): string {
+  let out = "";
+  let last = "";
+  for (const ch of part) {
+    if (ch === last) continue;
+    out += ch;
+    last = ch;
+  }
+  return out;
+}
+
+function normalizePivotSeparators(raw: string): string {
+  return raw.replace(/\uFF5C/g, "|").trim();
+}
+
+function normalizeAndValidateCoupletZh(rawZh: unknown, idx: number): string {
+  if (typeof rawZh !== "string" || !rawZh.trim()) {
+    throw new Error(`couplets[${idx}].zh is required and must be a non-empty 'LEFT|RIGHT' string.`);
+  }
+  const normalized = normalizePivotSeparators(rawZh);
+  const parts = normalized.split("|");
+  if (parts.length !== 2) {
+    throw new Error(
+      `couplets[${idx}].zh must contain exactly 1 '|' pivot separator dividing left and right halves (found ${parts.length - 1} in '${normalized}').`
+    );
+  }
+  const left = parts[0].trim();
+  const right = parts[1].trim();
+  const leftLen = [...left].length;
+  const rightLen = [...right].length;
+  if (!left || !right) {
+    throw new Error(
+      `couplets[${idx}].zh must have non-empty left and right halves around '|' (leftLen=${leftLen}, rightLen=${rightLen}).`
+    );
+  }
+  if (/\s/u.test(left) || /\s/u.test(right)) {
+    throw new Error(
+      `couplets[${idx}].zh halves must not contain internal whitespace or newlines (got '${left}|${right}').`
+    );
+  }
+  if (EMOJI_PATTERN.test(left) || EMOJI_PATTERN.test(right)) {
+    throw new Error(`couplets[${idx}].zh must not contain emoji (got '${left}|${right}').`);
+  }
+  if (ZH_MARKDOWN_PATTERN.test(left) || ZH_MARKDOWN_PATTERN.test(right)) {
+    throw new Error(
+      `couplets[${idx}].zh must not contain Markdown formatting (* _ \` # >) (got '${left}|${right}').`
+    );
+  }
+  if (
+    left.includes("——") ||
+    right.includes("——") ||
+    ZH_PUNCTUATION_PATTERN.test(left) ||
+    ZH_PUNCTUATION_PATTERN.test(right)
+  ) {
+    throw new Error(
+      `couplets[${idx}].zh must not contain punctuation or dashes (got '${left}|${right}').`
+    );
+  }
+  if (leftLen < 2 || leftLen > 6 || rightLen < 2 || rightLen > 6 || leftLen !== rightLen) {
+    throw new Error(
+      `couplets[${idx}].zh halves must each be 2..6 characters with equal code-point length (leftLen=${leftLen}, rightLen=${rightLen}, diff=${Math.abs(leftLen - rightLen)} in '${left}|${right}').`
+    );
+  }
+  return `${left}|${right}`;
+}
+
+function normalizeAndValidateCoupletEn(rawEn: unknown, idx: number): string {
+  if (typeof rawEn !== "string" || !rawEn.trim()) {
+    throw new Error(`couplets[${idx}].en is required and must be a non-empty 'LEFT|RIGHT' string.`);
+  }
+  const normalized = normalizePivotSeparators(rawEn);
+  const parts = normalized.split("|");
+  if (parts.length !== 2) {
+    throw new Error(
+      `couplets[${idx}].en must contain exactly 1 '|' pivot separator dividing left and right halves (found ${parts.length - 1} in '${normalized}').`
+    );
+  }
+  const left = parts[0].trim().replace(/\s+/g, " ").toUpperCase();
+  const right = parts[1].trim().replace(/\s+/g, " ").toUpperCase();
+  if (!left || !right) {
+    throw new Error(
+      `couplets[${idx}].en must have non-empty left and right halves around '|' (leftLen=${left.length}, rightLen=${right.length}).`
+    );
+  }
+  if (!EN_HALF_PATTERN.test(left) || !EN_HALF_PATTERN.test(right)) {
+    throw new Error(
+      `couplets[${idx}].en halves must contain only uppercase ASCII letters A-Z and single spaces (no punctuation, apostrophes, hyphens, digits, or emoji): left='${left}' (len=${left.length}), right='${right}' (len=${right.length}).`
+    );
+  }
+
+  const leftRaw = left.replace(/ /g, "");
+  const rightRaw = right.replace(/ /g, "");
+  const leftOut = leftRaw.length > rightRaw.length ? dedupeAdjacentChars(leftRaw) : leftRaw;
+  const rightOut = rightRaw.length > leftRaw.length ? dedupeAdjacentChars(rightRaw) : rightRaw;
+  const diff = Math.abs(leftOut.length - rightOut.length);
+
+  if (leftOut.length < 6 || leftOut.length > 17 || rightOut.length < 6 || rightOut.length > 17) {
+    throw new Error(
+      `couplets[${idx}].en rendered PivotText halves must each be 6..17 chars (after removing spaces and deduping adjacent identical letters on the strictly longer half): leftOut='${leftOut}' (${leftOut.length}), rightOut='${rightOut}' (${rightOut.length}), diff=${diff}.`
+    );
+  }
+  if (diff > 3) {
+    throw new Error(
+      `couplets[${idx}].en rendered PivotText halves differ by ${diff} chars (max allowed is 3; aim for <= 2): leftOut='${leftOut}' (${leftOut.length}), rightOut='${rightOut}' (${rightOut.length}).`
+    );
+  }
+
+  return `${left}|${right}`;
+}
+
+export function parseCoupletsJson(coupletsJson: string | null | undefined): CsteixWuxuCouplet[] {
+  if (!coupletsJson) return [];
+  const parsed = safeJsonParse<unknown[]>(coupletsJson);
+  if (!Array.isArray(parsed)) return [];
+  const out: CsteixWuxuCouplet[] = [];
+  for (const rawItem of parsed) {
+    if (!rawItem || typeof rawItem !== "object" || Array.isArray(rawItem)) continue;
+    const item = rawItem as Record<string, unknown>;
+    const id = typeof item.id === "string" ? item.id.trim() : "";
+    const dim = typeof item.dimension === "string" ? normalizeSingleDimension(item.dimension) : null;
+    const zh = typeof item.zh === "string" ? item.zh : "";
+    const en = typeof item.en === "string" ? item.en : "";
+    if (!id || !dim || !zh || !en) continue;
+    const sourceLine =
+      typeof item.sourceLine === "string" && item.sourceLine.trim().length > 0
+        ? item.sourceLine.trim()
+        : null;
+    out.push({
+      id,
+      dimension: dim,
+      zh,
+      en,
+      sourceLine
+    });
+  }
+  return out;
+}
+
+export function normalizeAndValidateCouplets(
+  raw: unknown,
+  existingCouplets: CsteixWuxuCouplet[] = []
+): CsteixWuxuCouplet[] {
+  if (!Array.isArray(raw)) {
+    throw new Error("'couplets' must be an array of at most 4 couplet objects.");
+  }
+  if (raw.length > MAX_COUPLETS_PER_ARTICLE) {
+    throw new Error(
+      `Too many couplets: got ${raw.length}, maximum allowed is ${MAX_COUPLETS_PER_ARTICLE} per article (recommended 0-2).`
+    );
+  }
+
+  const seenZh = new Set<string>();
+  const seenIds = new Set<string>();
+  const results: CsteixWuxuCouplet[] = [];
+
+  for (let idx = 0; idx < raw.length; idx += 1) {
+    const entry = raw[idx] as CsteixWuxuCoupletInput | undefined;
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new Error(`couplets[${idx}] must be an object.`);
+    }
+
+    const rawDim = (entry as { dimension?: unknown }).dimension;
+    const dimension = typeof rawDim === "string" ? normalizeSingleDimension(rawDim) : null;
+    if (!dimension) {
+      throw new Error(
+        `couplets[${idx}].dimension '${String(rawDim ?? "")}' is invalid. Allowed: chaos, spacetime, existence, ix.`
+      );
+    }
+
+    const zh = normalizeAndValidateCoupletZh((entry as { zh?: unknown }).zh, idx);
+    const en = normalizeAndValidateCoupletEn((entry as { en?: unknown }).en, idx);
+
+    if (zh.includes("我求")) {
+      const hasIx = /\bIX\b/.test(en);
+      const forbiddenMatch = IX_FORBIDDEN_TERMS_PATTERN.exec(en);
+      if (!hasIx && forbiddenMatch) {
+        throw new Error(
+          `couplets[${idx}]: '我求' in zh must be rendered as 'IX' in en (found '${forbiddenMatch[1]}'; never SEEK/SEEKING/EXPLORE/EXPLORING/QUEST/PURSUIT).`
+        );
+      }
+    }
+
+    const rawSourceLine = (entry as { sourceLine?: unknown }).sourceLine;
+    if (rawSourceLine !== undefined && rawSourceLine !== null && typeof rawSourceLine !== "string") {
+      throw new Error(`couplets[${idx}].sourceLine must be a string or null when provided.`);
+    }
+    const sourceLine = normalizeOptionalNullableString(rawSourceLine as string | null | undefined) ?? null;
+
+    if (seenZh.has(zh)) {
+      throw new Error(
+        `Duplicate normalized zh couplet '${zh}' at couplets[${idx}]. Each couplet on an article must have a unique zh.`
+      );
+    }
+    seenZh.add(zh);
+
+    const rawId = (entry as { id?: unknown }).id;
+    if (rawId !== undefined && rawId !== null && typeof rawId !== "string") {
+      throw new Error(`couplets[${idx}].id must be a string when provided.`);
+    }
+    const callerId = typeof rawId === "string" ? rawId.trim() : "";
+    let resolvedId = callerId;
+    if (!resolvedId) {
+      const matchedExisting = existingCouplets.find(
+        (existing) =>
+          existing.dimension === dimension && existing.zh === zh && !seenIds.has(existing.id)
+      );
+      resolvedId = matchedExisting ? matchedExisting.id : crypto.randomUUID();
+    }
+    if (seenIds.has(resolvedId)) {
+      throw new Error(`Duplicate couplet id '${resolvedId}' at couplets[${idx}].`);
+    }
+    seenIds.add(resolvedId);
+
+    results.push({
+      id: resolvedId,
+      dimension,
+      zh,
+      en,
+      sourceLine
+    });
+  }
+
+  return results;
+}
+
+export function mergeAppendedCouplets(
+  existing: CsteixWuxuCouplet[],
+  rawAppend: unknown
+): CsteixWuxuCouplet[] {
+  if (!Array.isArray(rawAppend)) {
+    throw new Error("'appendCouplets' must be a non-empty array of couplet objects (1..4).");
+  }
+  if (rawAppend.length === 0) {
+    throw new Error(
+      "'appendCouplets' must contain at least 1 couplet (to clear couplets, pass couplets: [])."
+    );
+  }
+  const incoming = normalizeAndValidateCouplets(rawAppend, existing);
+  const callerHasIds = rawAppend.map((item) => {
+    const rawId = (item as { id?: unknown } | null)?.id;
+    return typeof rawId === "string" && rawId.trim().length > 0;
+  });
+
+  const merged = existing.map((item) => ({ ...item }));
+  for (let idx = 0; idx < incoming.length; idx += 1) {
+    const next = incoming[idx];
+    const existingIdx = merged.findIndex((item) => item.zh === next.zh);
+    if (existingIdx >= 0) {
+      const preservedId = callerHasIds[idx] ? next.id : merged[existingIdx].id;
+      merged[existingIdx] = {
+        id: preservedId,
+        dimension: next.dimension,
+        zh: next.zh,
+        en: next.en,
+        sourceLine: next.sourceLine
+      };
+    } else {
+      merged.push(next);
+    }
+  }
+
+  if (merged.length > MAX_COUPLETS_PER_ARTICLE) {
+    throw new Error(
+      `Cannot append ${incoming.length} couplet(s): combined total would be ${merged.length}, exceeding maximum of ${MAX_COUPLETS_PER_ARTICLE} per article (existing=${existing.length}, netAdded=${merged.length - existing.length}).`
+    );
+  }
+
+  return merged;
+}
 
 function parseDimensionsJson(dimensionsJson: string): CsteixDimension[] {
   const parsedDims = safeJsonParse<string[]>(dimensionsJson) ?? [];
@@ -285,6 +566,7 @@ function mapWuxuRow(row: CsteixWuxuRow): CsteixWuxuArticle {
     bodyZh: row.body_zh,
     bodyEn: row.body_en ?? null,
     rawNotes: row.raw_notes ?? null,
+    couplets: parseCoupletsJson(row.couplets_json),
     revision: row.revision,
     deletedAt: row.deleted_at ?? null,
     createdAt: row.created_at,
@@ -310,6 +592,7 @@ function toSummaryItem(article: CsteixWuxuArticle, includeBody: boolean): Csteix
     headings,
     ...(headingsEn && headingsEn.length > 0 ? { headingsEn } : {}),
     leavingLines,
+    couplets: article.couplets,
     revision: article.revision,
     deletedAt: article.deletedAt ?? null,
     createdAt: article.createdAt,
@@ -540,7 +823,7 @@ export class CsteixOperations {
       allowedSet.has("wuxu")
         ? this.db
             .prepare(
-              `SELECT id, slug, title, title_en, dimensions_json, written_at, timezone,
+              `SELECT id, slug, title, title_en, dimensions_json, couplets_json, written_at, timezone,
                       revision, deleted_at, created_at, updated_at,
                       CASE WHEN body_en IS NOT NULL AND TRIM(body_en) != '' THEN 1 ELSE 0 END AS has_english,
                       CASE WHEN raw_notes IS NOT NULL AND TRIM(raw_notes) != '' THEN 1 ELSE 0 END AS has_raw_notes
@@ -577,11 +860,23 @@ export class CsteixOperations {
         existence: 0,
         ix: 0
       };
+      const coupletsByDimension: Record<CsteixDimension, number> = {
+        chaos: 0,
+        spacetime: 0,
+        existence: 0,
+        ix: 0
+      };
+      let coupletCount = 0;
       let withEnglishCount = 0;
       let withRawNotesCount = 0;
       for (const meta of filtered) {
         for (const dim of parseDimensionsJson(meta.dimensions_json)) {
           byDimension[dim] += 1;
+        }
+        const rowCouplets = parseCoupletsJson(meta.couplets_json);
+        coupletCount += rowCouplets.length;
+        for (const couplet of rowCouplets) {
+          coupletsByDimension[couplet.dimension] += 1;
         }
         if (Number(meta.has_english) === 1) withEnglishCount += 1;
         if (Number(meta.has_raw_notes) === 1) withRawNotesCount += 1;
@@ -598,6 +893,8 @@ export class CsteixOperations {
         totalCount: filtered.length,
         allTimeCount: allActive.length,
         byDimension,
+        coupletCount,
+        coupletsByDimension,
         withEnglishCount,
         withRawNotesCount,
         latestArticle: latestRow ? toSummaryItem(mapWuxuRow(latestRow), false) : null
@@ -806,6 +1103,7 @@ export class CsteixOperations {
     query?: string;
     hasRaw?: boolean;
     hasEn?: boolean;
+    hasCouplets?: boolean;
     includeDeleted?: boolean;
     includeBody?: boolean;
     limit?: number;
@@ -834,9 +1132,17 @@ export class CsteixOperations {
     if (trimmedQuery) {
       const likePattern = `%${escapeSqlLike(trimmedQuery)}%`;
       clauses.push(
-        `(slug LIKE ? ESCAPE '\\' OR title LIKE ? ESCAPE '\\' OR COALESCE(title_en, '') LIKE ? ESCAPE '\\' OR body_zh LIKE ? ESCAPE '\\' OR COALESCE(body_en, '') LIKE ? ESCAPE '\\' OR COALESCE(raw_notes, '') LIKE ? ESCAPE '\\')`
+        `(slug LIKE ? ESCAPE '\\' OR title LIKE ? ESCAPE '\\' OR COALESCE(title_en, '') LIKE ? ESCAPE '\\' OR body_zh LIKE ? ESCAPE '\\' OR COALESCE(body_en, '') LIKE ? ESCAPE '\\' OR COALESCE(raw_notes, '') LIKE ? ESCAPE '\\' OR COALESCE(couplets_json, '') LIKE ? ESCAPE '\\')`
       );
-      bindings.push(likePattern, likePattern, likePattern, likePattern, likePattern, likePattern);
+      bindings.push(
+        likePattern,
+        likePattern,
+        likePattern,
+        likePattern,
+        likePattern,
+        likePattern,
+        likePattern
+      );
     }
 
     const whereSql = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
@@ -851,7 +1157,7 @@ export class CsteixOperations {
 
     // Select lightweight columns first when full bodies aren't immediately requested in SQL, then
     // hydrate only the paginated slice so headings/leavingLines never scan off-page articles.
-    const metaSql = `SELECT id, slug, title, title_en, dimensions_json, written_at, timezone,
+    const metaSql = `SELECT id, slug, title, title_en, dimensions_json, couplets_json, written_at, timezone,
                             revision, deleted_at, created_at, updated_at,
                             CASE WHEN body_en IS NOT NULL AND TRIM(body_en) != '' THEN 1 ELSE 0 END AS has_english,
                             CASE WHEN raw_notes IS NOT NULL AND TRIM(raw_notes) != '' THEN 1 ELSE 0 END AS has_raw_notes
@@ -874,6 +1180,11 @@ export class CsteixOperations {
     }
     if (targetDim) {
       filteredMeta = filteredMeta.filter((row) => parseDimensionsJson(row.dimensions_json).includes(targetDim));
+    }
+    if (options.hasCouplets === true) {
+      filteredMeta = filteredMeta.filter((row) => parseCoupletsJson(row.couplets_json).length > 0);
+    } else if (options.hasCouplets === false) {
+      filteredMeta = filteredMeta.filter((row) => parseCoupletsJson(row.couplets_json).length === 0);
     }
 
     const { limit, offset } = normalizePagination(options);
@@ -933,6 +1244,7 @@ export class CsteixOperations {
     bodyZh: string;
     bodyEn?: string | null;
     rawNotes?: string | null;
+    couplets?: unknown;
     requestId?: string;
     client?: string;
   }): Promise<Record<string, unknown>> {
@@ -964,6 +1276,8 @@ export class CsteixOperations {
     const bodyZh = requireNonEmptyString(input.bodyZh, "bodyZh");
     const bodyEn = normalizeOptionalNullableString(input.bodyEn) ?? null;
     const rawNotes = normalizeOptionalNullableString(input.rawNotes) ?? null;
+    const couplets = input.couplets === undefined ? [] : normalizeAndValidateCouplets(input.couplets);
+    const coupletsJson = JSON.stringify(couplets);
 
     const existingSlug = await this.db
       .prepare("SELECT id, slug, revision, deleted_at FROM csteix_wuxu WHERE slug = ?")
@@ -998,6 +1312,7 @@ export class CsteixOperations {
         slug,
         revision,
         dimensions,
+        coupletCount: couplets.length,
         ...(input.client ? { client: input.client } : {})
       }
     };
@@ -1006,9 +1321,9 @@ export class CsteixOperations {
       this.db
         .prepare(
           `INSERT INTO csteix_wuxu (
-            id, slug, title, title_en, dimensions_json, written_at, timezone,
+            id, slug, title, title_en, dimensions_json, couplets_json, written_at, timezone,
             body_zh, body_en, raw_notes, revision, deleted_at, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`
         )
         .bind(
           id,
@@ -1016,6 +1331,7 @@ export class CsteixOperations {
           title,
           titleEn,
           JSON.stringify(dimensions),
+          coupletsJson,
           writtenAt,
           timezone,
           bodyZh,
@@ -1039,6 +1355,7 @@ export class CsteixOperations {
       bodyZh,
       bodyEn,
       rawNotes,
+      couplets,
       revision,
       deletedAt: null,
       createdAt: now,
@@ -1068,6 +1385,8 @@ export class CsteixOperations {
     appendBodyZh?: string;
     appendBodyEn?: string;
     appendRawNotes?: string;
+    couplets?: unknown;
+    appendCouplets?: unknown;
     requestId?: string;
     client?: string;
   }): Promise<Record<string, unknown>> {
@@ -1121,7 +1440,11 @@ export class CsteixOperations {
     if (input.rawNotes !== undefined && input.appendRawNotes !== undefined) {
       throw new Error("Cannot provide both 'rawNotes' and 'appendRawNotes' in the same update.");
     }
+    if (input.couplets !== undefined && input.appendCouplets !== undefined) {
+      throw new Error("Cannot provide both 'couplets' and 'appendCouplets' in the same update.");
+    }
 
+    const existingCouplets = parseCoupletsJson(existing.couplets_json);
     let nextTitle = existing.title;
     let nextTitleEn = existing.title_en;
     let nextDimensions = mapWuxuRow(existing).dimensions;
@@ -1130,6 +1453,7 @@ export class CsteixOperations {
     let nextBodyZh = existing.body_zh;
     let nextBodyEn = existing.body_en;
     let nextRawNotes = existing.raw_notes;
+    let nextCouplets = existingCouplets;
     const changedFields: string[] = [];
 
     if (input.title !== undefined) {
@@ -1180,6 +1504,13 @@ export class CsteixOperations {
         : addition;
       changedFields.push("appendRawNotes");
     }
+    if (input.couplets !== undefined) {
+      nextCouplets = normalizeAndValidateCouplets(input.couplets, existingCouplets);
+      changedFields.push("couplets");
+    } else if (input.appendCouplets !== undefined) {
+      nextCouplets = mergeAppendedCouplets(existingCouplets, input.appendCouplets);
+      changedFields.push("appendCouplets");
+    }
 
     if (changedFields.length === 0) {
       throw new Error("csteix_update_wuxu requires at least one field to update or append.");
@@ -1202,6 +1533,7 @@ export class CsteixOperations {
         slug: existing.slug,
         revision: nextRevision,
         changedFields,
+        coupletCount: nextCouplets.length,
         ...(input.client ? { client: input.client } : {})
       }
     };
@@ -1209,7 +1541,7 @@ export class CsteixOperations {
     const updateResult = await this.db
       .prepare(
         `UPDATE csteix_wuxu
-         SET title = ?, title_en = ?, dimensions_json = ?, written_at = ?, timezone = ?,
+         SET title = ?, title_en = ?, dimensions_json = ?, couplets_json = ?, written_at = ?, timezone = ?,
              body_zh = ?, body_en = ?, raw_notes = ?, revision = ?, updated_at = ?
          WHERE id = ? AND revision = ? AND deleted_at IS NULL`
       )
@@ -1217,6 +1549,7 @@ export class CsteixOperations {
         nextTitle,
         nextTitleEn,
         JSON.stringify(nextDimensions),
+        JSON.stringify(nextCouplets),
         nextWrittenAt,
         nextTimezone,
         nextBodyZh,
@@ -1249,6 +1582,7 @@ export class CsteixOperations {
       bodyZh: nextBodyZh,
       bodyEn: nextBodyEn,
       rawNotes: nextRawNotes,
+      couplets: nextCouplets,
       revision: nextRevision,
       deletedAt: null,
       createdAt: existing.created_at,
@@ -1505,6 +1839,7 @@ export class CsteixOperations {
       bodyZh: string;
       bodyEn: string | null;
       rawNotes: string | null;
+      rawCouplets?: CsteixWuxuCoupletInput[];
     }> = [];
 
     const seenSlugs = new Set<string>();
@@ -1526,6 +1861,9 @@ export class CsteixOperations {
       const bodyZh = requireNonEmptyString(entry.bodyZh, `articles[${idx}].bodyZh`);
       const bodyEn = normalizeOptionalNullableString(entry.bodyEn) ?? null;
       const rawNotes = normalizeOptionalNullableString(entry.rawNotes) ?? null;
+      if (entry.couplets !== undefined) {
+        normalizeAndValidateCouplets(entry.couplets);
+      }
 
       normalizedItems.push({
         slug,
@@ -1537,7 +1875,8 @@ export class CsteixOperations {
         timezone,
         bodyZh,
         bodyEn,
-        rawNotes
+        rawNotes,
+        ...(entry.couplets !== undefined ? { rawCouplets: entry.couplets } : {})
       });
     }
 
@@ -1566,13 +1905,17 @@ export class CsteixOperations {
 
       if (!existing) {
         const id = crypto.randomUUID();
+        const coupletsJson =
+          item.rawCouplets !== undefined
+            ? JSON.stringify(normalizeAndValidateCouplets(item.rawCouplets))
+            : "[]";
         statements.push(
           this.db
             .prepare(
               `INSERT INTO csteix_wuxu (
-                id, slug, title, title_en, dimensions_json, written_at, timezone,
+                id, slug, title, title_en, dimensions_json, couplets_json, written_at, timezone,
                 body_zh, body_en, raw_notes, revision, deleted_at, created_at, updated_at
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, ?, ?)`
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, ?, ?)`
             )
             .bind(
               id,
@@ -1580,6 +1923,7 @@ export class CsteixOperations {
               item.title,
               item.titleEn,
               item.dimensionsJson,
+              coupletsJson,
               item.writtenAt,
               item.timezone,
               item.bodyZh,
@@ -1593,11 +1937,21 @@ export class CsteixOperations {
         continue;
       }
 
+      let nextCoupletsJson = existing.couplets_json ?? "[]";
+      let coupletsIdentical = true;
+      if (item.rawCouplets !== undefined) {
+        const existingCouplets = parseCoupletsJson(existing.couplets_json);
+        const nextCouplets = normalizeAndValidateCouplets(item.rawCouplets, existingCouplets);
+        nextCoupletsJson = JSON.stringify(nextCouplets);
+        coupletsIdentical = JSON.stringify(existingCouplets) === nextCoupletsJson;
+      }
+
       const identical =
         existing.deleted_at === null &&
         existing.title === item.title &&
         (existing.title_en ?? null) === item.titleEn &&
         existing.dimensions_json === item.dimensionsJson &&
+        coupletsIdentical &&
         existing.written_at === item.writtenAt &&
         existing.timezone === item.timezone &&
         existing.body_zh === item.bodyZh &&
@@ -1613,7 +1967,7 @@ export class CsteixOperations {
         this.db
           .prepare(
             `UPDATE csteix_wuxu
-             SET title = ?, title_en = ?, dimensions_json = ?, written_at = ?, timezone = ?,
+             SET title = ?, title_en = ?, dimensions_json = ?, couplets_json = ?, written_at = ?, timezone = ?,
                  body_zh = ?, body_en = ?, raw_notes = ?, revision = ?, deleted_at = NULL, updated_at = ?
              WHERE id = ?`
           )
@@ -1621,6 +1975,7 @@ export class CsteixOperations {
             item.title,
             item.titleEn,
             item.dimensionsJson,
+            nextCoupletsJson,
             item.writtenAt,
             item.timezone,
             item.bodyZh,

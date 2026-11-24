@@ -11,7 +11,7 @@ No CHAOX server or external computer is required.
 
 ## Prerequisites
 
-- **SX** and **BX** installed on your iPhone (with Phase 1A App Intents).
+- **SX** and **BX** installed on your iPhone.
 - At least one expense-capable project in SX for daily meals (for example, `日常餐饮` or `Daily Dining`).
 - A Vision LLM step inside Apple Shortcuts:
   - iOS 26/27 **Use Model** (Apple Intelligence / ChatGPT extension), **or**
@@ -42,7 +42,7 @@ Rules:
 - Return ONLY valid JSON with keys "sx" and "bx". No markdown fences, no commentary.
 - For "sx":
   - Pick an existing project from the provided SX catalog that supports expenses (prefer a daily dining / general spending project; NEVER invent a one-off project name for a single meal).
-  - "amount": number >= 0 from the user note.
+  - "amount": number > 0 from the user note.
   - "currency": 3-letter ISO currency code (default to the catalog defaultCurrency if omitted).
   - "tags": comma-separated existing tag names from the catalog where applicable (keep existing names, e.g. "午餐,轻食"), or omit/null to let SX inherit the project's latest tags.
   - "notes": concise dish summary in the user's language (no calories here unless useful).

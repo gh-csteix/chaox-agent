@@ -1,12 +1,13 @@
 import {
   MCP_PROMPTS,
   MCP_SERVER_INSTRUCTIONS,
-  SKILL_GUIDE_MARKDOWN
+  SKILL_GUIDE_MARKDOWN,
+  WUXU_COUPLETS_GUIDE_MARKDOWN
 } from "./guide.js";
-import { HttpError, isInternalError } from "./app.js";
+import { HttpError, isInternalError, readJsonBody } from "./app.js";
 import { McpToolDefinition, TOOL_DEFINITIONS } from "./mcp-tools.js";
 import { ExchangeStore } from "./store.js";
-import { AgentAppID } from "./types.js";
+import { AgentAppID, CsteixWuxuCouplet } from "./types.js";
 
 const SUPPORTED_PROTOCOL_VERSIONS = [
   "2025-11-25",
@@ -16,6 +17,7 @@ const SUPPORTED_PROTOCOL_VERSIONS = [
 ];
 const DEFAULT_PROTOCOL_VERSION = "2025-03-26";
 const MAX_JSON_RPC_BATCH = 25;
+const DEFAULT_MCP_MAX_BODY_BYTES = 2 * 1024 * 1024;
 
 export interface McpScope {
   apps?: Set<AgentAppID>;
@@ -26,6 +28,7 @@ export interface McpScope {
 export interface McpRequestOptions {
   forceReadOnly?: boolean;
   allowPreferencesWrite?: boolean;
+  maxBodyBytes?: number;
 }
 
 const TOOL_BY_NAME = new Map<string, McpToolDefinition>(
@@ -246,7 +249,15 @@ async function dispatchTool(
       return store.sx.recordExpense({
         amount: Number(args.amount),
         projectName: String(args.projectName ?? ""),
-        credentialId: optNum(args, "credentialId"),
+        credentialId:
+          args.credentialId === undefined
+            ? undefined
+            : args.credentialId === null
+              ? null
+              : typeof args.credentialId === "number"
+                ? args.credentialId
+                : Number.NaN,
+        skipCredential: optBool(args, "skipCredential"),
         currency: optStr(args, "currency"),
         tags: optStrArr(args, "tags"),
         note: optStr(args, "note") ?? optStr(args, "notes"),
@@ -306,7 +317,15 @@ async function dispatchTool(
       return store.sx.recordIncome({
         amount: Number(args.amount),
         projectName: String(args.projectName ?? ""),
-        credentialId: optNum(args, "credentialId"),
+        credentialId:
+          args.credentialId === undefined
+            ? undefined
+            : args.credentialId === null
+              ? null
+              : typeof args.credentialId === "number"
+                ? args.credentialId
+                : Number.NaN,
+        skipCredential: optBool(args, "skipCredential"),
         currency: optStr(args, "currency"),
         tags: optStrArr(args, "tags"),
         note: optStr(args, "note") ?? optStr(args, "notes"),
@@ -742,6 +761,7 @@ async function dispatchTool(
         query: optStr(args, "query"),
         hasRaw: optBool(args, "hasRaw"),
         hasEn: optBool(args, "hasEn"),
+        hasCouplets: optBool(args, "hasCouplets"),
         includeDeleted: optBool(args, "includeDeleted"),
         includeBody: optBool(args, "includeBody"),
         limit: optNum(args, "limit"),
@@ -763,6 +783,7 @@ async function dispatchTool(
         bodyZh: String(args.bodyZh ?? ""),
         bodyEn: args.bodyEn === null ? null : optStr(args, "bodyEn"),
         rawNotes: args.rawNotes === null ? null : optStr(args, "rawNotes"),
+        couplets: optRawValue(args, "couplets"),
         requestId: optStr(args, "requestId"),
         client: optStr(args, "client")
       });
@@ -782,6 +803,8 @@ async function dispatchTool(
         appendBodyZh: optStr(args, "appendBodyZh"),
         appendBodyEn: optStr(args, "appendBodyEn"),
         appendRawNotes: optStr(args, "appendRawNotes"),
+        couplets: optRawValue(args, "couplets"),
+        appendCouplets: optRawValue(args, "appendCouplets"),
         requestId: optStr(args, "requestId"),
         client: optStr(args, "client")
       });
@@ -879,7 +902,18 @@ async function handleSingleRpc(
             name: "Personal Assistant Preferences",
             description: "User-defined routing rules and personal accounting/nutrition notes",
             mimeType: "text/markdown"
-          }
+          },
+          ...(!scope.apps || scope.apps.has("csteix")
+            ? [
+                {
+                  uri: "chaox://guide/wuxu-couplets",
+                  name: "CSTEIX Wuxu Stage Couplets Guide",
+                  description:
+                    "Selectivity rules, PivotText symmetry math, CSTEIX glossary (IX/DAO/VESSEL/WEIGHT/STANDING), and worked examples for Stage Couplets",
+                  mimeType: "text/markdown"
+                }
+              ]
+            : [])
         ]
       });
 
@@ -911,6 +945,18 @@ async function handleSingleRpc(
           contents: [{ uri, mimeType: "text/markdown", text: prefs.content }]
         });
       }
+      if (uri === "chaox://guide/wuxu-couplets") {
+        if (scope.apps && !scope.apps.has("csteix")) {
+          return rpcError(
+            id,
+            -32602,
+            "Resource 'chaox://guide/wuxu-couplets' is excluded by this endpoint's 'apps' scope."
+          );
+        }
+        return rpcResult(id, {
+          contents: [{ uri, mimeType: "text/markdown", text: WUXU_COUPLETS_GUIDE_MARKDOWN }]
+        });
+      }
       if (uri.startsWith("chaox://wuxu/")) {
         if (scope.apps && !scope.apps.has("csteix")) {
           return rpcError(
@@ -919,7 +965,12 @@ async function handleSingleRpc(
             "Resource 'chaox://wuxu/...' is excluded by this endpoint's 'apps' scope."
           );
         }
-        const slug = decodeURIComponent(uri.slice("chaox://wuxu/".length).trim());
+        let slug: string;
+        try {
+          slug = decodeURIComponent(uri.slice("chaox://wuxu/".length).trim());
+        } catch {
+          return rpcError(id, -32602, "Invalid percent-encoding in Wuxu resource URI.");
+        }
         if (!slug) {
           return rpcError(id, -32602, "Missing Wuxu slug in resource URI.");
         }
@@ -935,7 +986,20 @@ async function handleSingleRpc(
             bodyZh: string;
             bodyEn?: string | null;
             rawNotes?: string | null;
+            couplets?: CsteixWuxuCouplet[];
           };
+          const coupletLines =
+            article.couplets && article.couplets.length > 0
+              ? [
+                  "",
+                  "## Stage Couplets",
+                  "",
+                  ...article.couplets.map(
+                    (c) =>
+                      `- **[${c.dimension}]** \`${c.zh}\` — \`${c.en}\`${c.sourceLine ? ` (source: "${c.sourceLine}")` : ""}`
+                  )
+                ]
+              : [];
           const lines = [
             `# ${article.title}`,
             ...(article.titleEn ? [`_${article.titleEn}_`] : []),
@@ -947,7 +1011,8 @@ async function handleSingleRpc(
             "",
             article.bodyZh,
             ...(article.bodyEn ? ["", "---", "", article.bodyEn] : []),
-            ...(article.rawNotes ? ["", "## Raw Notes", "", article.rawNotes] : [])
+            ...(article.rawNotes ? ["", "## Raw Notes", "", article.rawNotes] : []),
+            ...coupletLines
           ];
           return rpcResult(id, {
             contents: [{ uri, mimeType: "text/markdown", text: lines.join("\n") }]
@@ -1033,7 +1098,8 @@ async function handleSingleRpc(
           `Draft or continue a private CSTEIX Wuxu article (${topicHint}):\n` +
           `1. Call csteix_list_wuxu to inspect existing pieces on today's date or matching topic.\n` +
           `2. If continuing a same-day article, call csteix_get_wuxu to read full text and current revision, then call csteix_update_wuxu with expectedRevision and appendBodyZh/appendRawNotes.\n` +
-          `3. If creating a new piece, use a lowercase kebab-case slug, dimensions from ['chaos','spacetime','existence','ix'], pure body Markdown in bodyZh (no leading # Title header block), and verbatim user utterances in rawNotes.`;
+          `3. If creating a new piece, use a lowercase kebab-case slug, dimensions from ['chaos','spacetime','existence','ix'], pure body Markdown in bodyZh (no leading # Title header block), and verbatim user utterances in rawNotes.\n` +
+          `4. Optionally distill 0-2 timeless bilingual Stage Couplets in 'couplets' (or 'appendCouplets') ONLY when the piece yields aphorisms worthy of the meditation stage (default [] / 0; never force onto routine logs). Read chaox://guide/wuxu-couplets first for PivotText symmetry math and CSTEIX terminology ('我求' must be 'IX', never SEEKING/EXPLORE).`;
         return rpcResult(id, {
           description: "Draft or continue a private CSTEIX Wuxu article",
           messages: [{ role: "user", content: { type: "text", text } }]
@@ -1061,10 +1127,14 @@ export async function handleMcpRequest(
 
   const scope = parseMcpScope(new URL(request.url), options);
 
+  const maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MCP_MAX_BODY_BYTES;
   let parsed: unknown;
   try {
-    parsed = await request.json();
-  } catch {
+    parsed = await readJsonBody(request, maxBodyBytes);
+  } catch (error) {
+    if (error instanceof HttpError) {
+      return jsonResponse({ error: error.message }, error.status);
+    }
     return rpcError(null, -32700, "Invalid JSON payload");
   }
 

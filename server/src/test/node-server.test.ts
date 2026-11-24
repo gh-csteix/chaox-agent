@@ -333,13 +333,56 @@ test("SqliteDatabase cleanly opens and migrates a D1-exported SQLite file withou
         .first<{ value: string }>();
       assert.equal(pref?.value, "Imported Prefs");
 
+      // Confirm migration 0006 created app_dataset_chunks and accepts chunk rows.
+      const chunkTable = await db
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'app_dataset_chunks'")
+        .first<{ name: string }>();
+      assert.equal(chunkTable?.name, "app_dataset_chunks");
+
+      await db
+        .prepare(
+          "INSERT INTO app_dataset_chunks (app, domain, chunk_index, chunk_data, updated_at) VALUES (?, ?, ?, ?, ?)"
+        )
+        .bind("sx", "expenses", 0, '[{"id":1,"notes":"imported"}]', "2026-11-22T00:00:00.000Z")
+        .run();
+
       // Re-opening must remain idempotent and zero-error.
     } finally {
       db.close();
     }
 
     const db2 = new SqliteDatabase(importedPath);
-    db2.close();
+    try {
+      const chunkRow = await db2
+        .prepare("SELECT chunk_data FROM app_dataset_chunks WHERE app = ? AND domain = ? AND chunk_index = ?")
+        .bind("sx", "expenses", 0)
+        .first<{ chunk_data: string }>();
+      assert.equal(chunkRow?.chunk_data, '[{"id":1,"notes":"imported"}]');
+    } finally {
+      db2.close();
+    }
+
+    // Re-opening after dropping _chaox_migrations (simulating a newer D1 export that already has
+    // app_dataset_chunks) must re-apply migrations idempotently and preserve existing chunk rows.
+    const dropTracker = new DatabaseSync(importedPath);
+    dropTracker.exec("DROP TABLE _chaox_migrations;");
+    dropTracker.close();
+
+    const db3 = new SqliteDatabase(importedPath);
+    try {
+      const prefAfter = await db3
+        .prepare("SELECT value FROM preferences WHERE key = 'user_preferences'")
+        .first<{ value: string }>();
+      assert.equal(prefAfter?.value, "Imported Prefs");
+
+      const chunkAfter = await db3
+        .prepare("SELECT chunk_data FROM app_dataset_chunks WHERE app = ? AND domain = ? AND chunk_index = ?")
+        .bind("sx", "expenses", 0)
+        .first<{ chunk_data: string }>();
+      assert.equal(chunkAfter?.chunk_data, '[{"id":1,"notes":"imported"}]');
+    } finally {
+      db3.close();
+    }
   });
 });
 

@@ -11,9 +11,9 @@
     "setup": "node scripts/setup.mjs",
     "split-tokens": "node scripts/split-tokens.mjs",
     "dev": "wrangler dev --config wrangler.local.toml",
-    "deploy": "wrangler deploy",
+    "deploy": "wrangler deploy --config wrangler.local.toml",
     "deploy:local-config": "wrangler deploy --config wrangler.local.toml",
-    "db:migrate:local": "wrangler d1 migrations apply chaox-agent --local",
+    "db:migrate:local": "wrangler d1 migrations apply chaox-agent --local --config wrangler.local.toml",
     "db:migrate:remote": "wrangler d1 migrations apply chaox-agent --remote --config wrangler.local.toml"
   },
   "devDependencies": {
@@ -23,6 +23,6 @@
     "wrangler": "^4.14.0"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13.0"
   }
 }

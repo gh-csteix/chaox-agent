@@ -2,8 +2,9 @@ import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
-import { handleRequest } from "./app.js";
+import { AuthRole, authenticateRequest, handleRequest } from "./app.js";
 import { SqliteDatabase } from "./sqlite.js";
+import { ServerEnv } from "./types.js";
 
 const DEFAULT_PORT = 8787;
 const DEFAULT_HOST = "0.0.0.0";
@@ -14,6 +15,57 @@ const DEFAULT_AUTH_RATE_LIMIT_MAX = 20;
 const DEFAULT_AUTH_RATE_LIMIT_WINDOW_MS = 60_000;
 const MAX_RATE_LIMIT_BUCKETS = 2048;
 const GZIP_MIN_BYTES = 1024;
+
+const PLACEHOLDER_TOKEN_PREFIX_PATTERN =
+  /^(?:replace[-_]?with|change[-_]?me|your[-_]?[a-z0-9_-]*token|example[-_]?[a-z0-9_-]*token|placeholder)/i;
+const PLACEHOLDER_TOKEN_LITERALS = new Set([
+  "changeme",
+  "change-me",
+  "change_me",
+  "secret",
+  "token",
+  "password",
+  "default",
+  "example",
+  "replace-me",
+  "replace_me",
+  "replaceme",
+  "todo",
+  "xxx"
+]);
+
+export function isPlaceholderToken(token: string): boolean {
+  const trimmed = token.trim();
+  if (!trimmed) return false;
+  if (PLACEHOLDER_TOKEN_LITERALS.has(trimmed.toLowerCase())) {
+    return true;
+  }
+  return PLACEHOLDER_TOKEN_PREFIX_PATTERN.test(trimmed);
+}
+
+function roleMaySendBody(pathname: string, method: string, role: AuthRole): boolean {
+  if (pathname === "/mcp") {
+    return method === "POST" && (role === "full" || role === "mcp" || role === "mcp_readonly");
+  }
+  if (pathname === "/preferences") {
+    return method === "PUT" && (role === "full" || role === "sync");
+  }
+  if (pathname.startsWith("/sync/")) {
+    return (method === "POST" || method === "PUT") && (role === "full" || role === "sync");
+  }
+  return false;
+}
+
+function requestMayHaveBody(req: http.IncomingMessage): boolean {
+  const contentLengthRaw = firstHeaderValue(req.headers["content-length"]);
+  if (contentLengthRaw !== undefined) {
+    const parsed = Number(contentLengthRaw);
+    if (!Number.isFinite(parsed) || parsed > 0) {
+      return true;
+    }
+  }
+  return req.headers["transfer-encoding"] !== undefined;
+}
 
 class PayloadTooLargeError extends Error {
   constructor(maxBytes: number) {
@@ -253,18 +305,26 @@ export async function startNodeServer(
           windowMs: DEFAULT_AUTH_RATE_LIMIT_WINDOW_MS
         });
 
+  const configuredTokens: Array<[string, string]> = (
+    [
+      ["CHAOX_AUTH_TOKEN", authToken],
+      ["CHAOX_SYNC_TOKEN", syncToken],
+      ["CHAOX_MCP_TOKEN", mcpToken],
+      ["CHAOX_MCP_READONLY_TOKEN", mcpReadOnlyToken]
+    ] as Array<[string, string]>
+  ).filter(([, val]) => val.length > 0);
+
+  for (const [envName, val] of configuredTokens) {
+    if (isPlaceholderToken(val)) {
+      throw new Error(
+        `Refusing to start: ${envName} appears to be a weak or placeholder token. Generate a strong random token with 'npm run token' or 'openssl rand -hex 32'.`
+      );
+    }
+  }
+
   const db = new SqliteDatabase(dbPath, { migrationsDir: options.migrationsDir });
 
   if (!options.quiet) {
-    const configuredTokens: Array<[string, string]> = (
-      [
-        ["CHAOX_AUTH_TOKEN", authToken],
-        ["CHAOX_SYNC_TOKEN", syncToken],
-        ["CHAOX_MCP_TOKEN", mcpToken],
-        ["CHAOX_MCP_READONLY_TOKEN", mcpReadOnlyToken]
-      ] as Array<[string, string]>
-    ).filter(([, val]) => val.length > 0);
-
     if (configuredTokens.length === 0) {
       console.warn(
         "[chaox-agent-server] WARNING: No auth token is configured (CHAOX_AUTH_TOKEN or CHAOX_SYNC_TOKEN/CHAOX_MCP_TOKEN). Protected routes (/mcp, /sync/*, /preferences) will return 401 until configured."
@@ -326,29 +386,7 @@ export async function startNodeServer(
         }
       }
 
-      const routeMaxBodyBytes =
-        requestUrl.pathname === "/mcp" || requestUrl.pathname === "/preferences"
-          ? Math.min(maxBodyBytes, DEFAULT_MCP_MAX_BODY_BYTES)
-          : maxBodyBytes;
-
-      let body: ArrayBuffer | undefined;
-      if (method !== "GET" && method !== "HEAD" && method !== "OPTIONS") {
-        const buffer = await readRequestBody(req, routeMaxBodyBytes);
-        if (buffer.length > 0) {
-          body = buffer.buffer.slice(
-            buffer.byteOffset,
-            buffer.byteOffset + buffer.byteLength
-          ) as ArrayBuffer;
-        }
-      }
-
-      const webReq = new Request(requestUrl, {
-        method,
-        headers: buildRequestHeaders(req.headers),
-        body
-      });
-
-      const webRes = await handleRequest(webReq, {
+      const env: ServerEnv = {
         DB: db,
         CHAOX_AUTH_TOKEN: authToken || undefined,
         CHAOX_SYNC_TOKEN: syncToken || undefined,
@@ -356,9 +394,45 @@ export async function startNodeServer(
         CHAOX_MCP_READONLY_TOKEN: mcpReadOnlyToken || undefined,
         CHAOX_ALLOWED_ORIGINS: allowedOrigins,
         CHAOX_ALLOW_MCP_PREFERENCES_WRITE: allowMcpPreferencesWriteEnv,
+        CHAOX_MAX_BODY_BYTES: String(maxBodyBytes),
         BACKEND_MODE: backendMode,
         SERVER_NAME: serverName
+      };
+
+      const headers = buildRequestHeaders(req.headers);
+
+      const routeMaxBodyBytes =
+        requestUrl.pathname === "/mcp" || requestUrl.pathname === "/preferences"
+          ? Math.min(maxBodyBytes, DEFAULT_MCP_MAX_BODY_BYTES)
+          : maxBodyBytes;
+
+      let body: ArrayBuffer | undefined;
+      let skippedUnreadBody = false;
+      if (method !== "GET" && method !== "HEAD" && method !== "OPTIONS") {
+        const authRole =
+          requestUrl.pathname === "/health"
+            ? null
+            : await authenticateRequest(headers.get("Authorization"), env);
+        if (authRole !== null && roleMaySendBody(requestUrl.pathname, method, authRole)) {
+          const buffer = await readRequestBody(req, routeMaxBodyBytes);
+          if (buffer.length > 0) {
+            body = buffer.buffer.slice(
+              buffer.byteOffset,
+              buffer.byteOffset + buffer.byteLength
+            ) as ArrayBuffer;
+          }
+        } else if (requestMayHaveBody(req)) {
+          skippedUnreadBody = true;
+        }
+      }
+
+      const webReq = new Request(requestUrl, {
+        method,
+        headers,
+        body
       });
+
+      const webRes = await handleRequest(webReq, env);
 
       if (rateLimitConfig && !bypassRateLimit) {
         const now = Date.now();
@@ -379,6 +453,9 @@ export async function startNodeServer(
         }
       }
 
+      if (skippedUnreadBody) {
+        res.setHeader("Connection", "close");
+      }
       const acceptEncoding = firstHeaderValue(req.headers["accept-encoding"]);
       await writeWebResponse(res, webRes, method, acceptEncoding);
     } catch (error) {

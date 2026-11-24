@@ -258,6 +258,13 @@ test("enforces CSTEIX read-only domains, strips places unless opted in, and summ
   const blockedRead = await callMcpTool(env, "csteix_list_wuxu", {});
   assert.equal(blockedRead.isError, true);
 
+  // Disabled read also hides datasetCounts.wuxu and Wuxu receipts in chaox_get_status.
+  const disabledStatus = await callMcpTool(env, "chaox_get_status", { app: "csteix" });
+  assert.equal(disabledStatus.isError, false);
+  const disabledApps = disabledStatus.parsed?.apps as Record<string, { datasetCounts: Record<string, number> }>;
+  assert.equal("wuxu" in disabledApps.csteix.datasetCounts, false);
+  assert.equal((disabledStatus.parsed?.recentReceipts as unknown[]).length, 0);
+
   // Re-enabling read confirms the wuxu article survived intact while read-only dwell dataset was pruned.
   await connectCsteix(env, {
     datasets: {}
@@ -705,4 +712,504 @@ test("prevents ghost applied receipt when csteix_wuxu loses a concurrent conditi
     .prepare("SELECT * FROM receipts WHERE request_id = 'wuxu-race-update'")
     .first();
   assert.equal(ghostReceipt, null);
+});
+
+test("validates and normalizes Wuxu stage couplets, PivotText math, and IX terminology guard", async () => {
+  const { env } = makeEnv();
+  await connectCsteix(env);
+
+  // Valid creation: normalizes full-width pipe ｜, trims spaces, uppercases & collapses EN spaces, normalizes dimension aliases.
+  const validCreate = await callMcpTool(env, "csteix_create_wuxu", {
+    slug: "couplet-valid",
+    title: "Valid Couplets",
+    dimensions: ["chaos", "ix"],
+    bodyZh: "Passage body.",
+    couplets: [
+      {
+        dimension: "混沌",
+        zh: "  一切 ｜ 基底  ",
+        en: "  all   things ｜ one   ground  ",
+        sourceLine: "  First spark from chaos  "
+      },
+      {
+        dimension: "我求",
+        zh: "万物之先｜是为故事",
+        en: "before all things | there was story"
+      },
+      {
+        dimension: "existence",
+        zh: "以身载道|无身则无",
+        en: "BODY CARRIES DAO|NO BODY NO DAO"
+      },
+      {
+        dimension: "ix",
+        zh: "此身有尽|我求无涯",
+        en: "THIS BODY ENDS|IX KNOWS NO END"
+      }
+    ]
+  });
+  assert.equal(validCreate.isError, false);
+  const article = validCreate.parsed?.article as {
+    couplets: Array<{ id: string; dimension: string; zh: string; en: string; sourceLine: string | null }>;
+  };
+  assert.equal(article.couplets.length, 4);
+  assert.deepEqual(
+    article.couplets.map((c) => ({ dimension: c.dimension, zh: c.zh, en: c.en, sourceLine: c.sourceLine })),
+    [
+      {
+        dimension: "chaos",
+        zh: "一切|基底",
+        en: "ALL THINGS|ONE GROUND",
+        sourceLine: "First spark from chaos"
+      },
+      {
+        dimension: "ix",
+        zh: "万物之先|是为故事",
+        en: "BEFORE ALL THINGS|THERE WAS STORY",
+        sourceLine: null
+      },
+      {
+        dimension: "existence",
+        zh: "以身载道|无身则无",
+        en: "BODY CARRIES DAO|NO BODY NO DAO",
+        sourceLine: null
+      },
+      {
+        dimension: "ix",
+        zh: "此身有尽|我求无涯",
+        en: "THIS BODY ENDS|IX KNOWS NO END",
+        sourceLine: null
+      }
+    ]
+  );
+  assert.ok(article.couplets.every((c) => c.id.length > 0));
+  const receipt = validCreate.parsed?.receipt as { details?: { coupletCount?: number } };
+  assert.equal(receipt.details?.coupletCount, 4);
+
+  // Also test PivotText max boundary (17 chars, diff 3) and non-我求 探求 exemption.
+  const boundaryCreate = await callMcpTool(env, "csteix_create_wuxu", {
+    slug: "couplet-boundary",
+    title: "Boundary Couplets",
+    dimensions: ["ix"],
+    bodyZh: "Boundary body.",
+    couplets: [
+      {
+        dimension: "existence",
+        zh: "风过千重|我自悠然",
+        en: "A THOUSAND WINDS PASS|I REMAIN UNTROUBLED"
+      },
+      {
+        dimension: "ix",
+        zh: "深度共鸣|耐心复利",
+        en: "DEPTH RESONATES|PATIENCE COMPOUNDS"
+      },
+      {
+        dimension: "ix",
+        zh: "未定义处|亦可探求",
+        en: "WHERE UNDEFINED|INQUIRY GOES ON"
+      }
+    ]
+  });
+  assert.equal(boundaryCreate.isError, false);
+
+  const dedupeEdgeCreate = await callMcpTool(env, "csteix_create_wuxu", {
+    slug: "couplet-dedupe-edge",
+    title: "Dedupe Edge Couplets",
+    dimensions: ["chaos", "spacetime"],
+    bodyZh: "Dedupe edge body.",
+    couplets: [
+      {
+        // Proves equal-length halves (6 vs 6) and shorter half with double letters (6 vs 9->7) are NOT deduped:
+        dimension: "chaos",
+        zh: "万物|皆流",
+        en: "ALL OUT|SEE YOU"
+      },
+      {
+        dimension: "spacetime",
+        zh: "晨昏|四季",
+        en: "ALL DAY|ALL LIGHTS"
+      }
+    ]
+  });
+  assert.equal(dedupeEdgeCreate.isError, false);
+
+  // Error cases with measured counts/diffs:
+  const expectCoupletError = async (slug: string, couplets: unknown[], pattern: RegExp) => {
+    const res = await callMcpTool(env, "csteix_create_wuxu", {
+      slug,
+      title: "Bad Couplet",
+      dimensions: ["chaos"],
+      bodyZh: "Body.",
+      couplets
+    });
+    assert.equal(res.isError, true, `Expected error for ${slug}`);
+    assert.match(res.text, pattern, `Unexpected error text for ${slug}: ${res.text}`);
+  };
+
+  // ZH missing or extra pipe
+  await expectCoupletError("err-zh-no-pipe", [{ dimension: "chaos", zh: "一切基底", en: "ALL THINGS|ONE GROUND" }], /found 0/);
+  await expectCoupletError("err-zh-two-pipes", [{ dimension: "chaos", zh: "一|切|基", en: "ALL THINGS|ONE GROUND" }], /found 2/);
+  // ZH whitespace, emoji, markdown, ——, punctuation
+  await expectCoupletError("err-zh-space", [{ dimension: "chaos", zh: "一 切|基 地", en: "ALL THINGS|ONE GROUND" }], /whitespace/);
+  await expectCoupletError("err-zh-emoji", [{ dimension: "chaos", zh: "一切✨|基底✨", en: "ALL THINGS|ONE GROUND" }], /emoji/);
+  await expectCoupletError("err-zh-md", [{ dimension: "chaos", zh: "*一切*|基底", en: "ALL THINGS|ONE GROUND" }], /Markdown/);
+  await expectCoupletError("err-zh-dash", [{ dimension: "chaos", zh: "一——|基底", en: "ALL THINGS|ONE GROUND" }], /punctuation or dashes/);
+  await expectCoupletError("err-zh-punct", [{ dimension: "chaos", zh: "一切，|基底。", en: "ALL THINGS|ONE GROUND" }], /punctuation/);
+  // ZH length asymmetry & bounds
+  await expectCoupletError("err-zh-asym", [{ dimension: "chaos", zh: "一切|基础之地", en: "ALL THINGS|ONE GROUND" }], /leftLen=2.*rightLen=4.*diff=2/);
+  await expectCoupletError("err-zh-short", [{ dimension: "chaos", zh: "一|基", en: "ALL THINGS|ONE GROUND" }], /leftLen=1.*rightLen=1/);
+  await expectCoupletError("err-zh-long", [{ dimension: "chaos", zh: "一二三四五六七|七六五四三二一", en: "ALL THINGS|ONE GROUND" }], /leftLen=7.*rightLen=7/);
+  // EN bad chars (apostrophe, hyphen, digits, punctuation)
+  await expectCoupletError("err-en-chars", [{ dimension: "chaos", zh: "一切|基底", en: "DON'T MOVE|STAND STILL" }], /ASCII letters A-Z/);
+  await expectCoupletError("err-en-hyphen", [{ dimension: "chaos", zh: "一切|基底", en: "SELF-MADE|ALL GROUND" }], /ASCII letters A-Z/);
+  // EN PivotText bounds (< 6, > 17, diff > 3)
+  await expectCoupletError("err-en-short", [{ dimension: "chaos", zh: "一切|基底", en: "NO WAY|ONE HI" }], /\(5\).*\(5\)/);
+  await expectCoupletError("err-en-long", [{ dimension: "chaos", zh: "一切|基底", en: "SOMETHING FAR TOO LONG|ANOTHER LONG PHRASE" }], /6\.\.17/);
+  await expectCoupletError("err-en-diff", [{ dimension: "chaos", zh: "一切|基底", en: "ALL FORM|NOTHING REMAINS" }], /differ by 7 chars.*leftOut='ALLFORM' \(7\).*rightOut='NOTHINGREMAINS' \(14\)/);
+  // Terminology guard: 我求 without IX using SEEKING / EXPLORE
+  await expectCoupletError("err-ix-seeking", [{ dimension: "ix", zh: "此身有尽|我求无涯", en: "THIS BODY ENDS|SEEKING NO END" }], /'我求'.*must be rendered as 'IX'.*'SEEKING'/);
+  await expectCoupletError("err-ix-explore", [{ dimension: "ix", zh: "此身有尽|我求无涯", en: "THIS BODY ENDS|EXPLORE NO END" }], /'我求'.*must be rendered as 'IX'.*'EXPLORE'/);
+  // Max 4 couplets and duplicate zh
+  await expectCoupletError(
+    "err-max-5",
+    [
+      { dimension: "chaos", zh: "一二|三四", en: "ONE TWO|THREE FOUR" },
+      { dimension: "chaos", zh: "二三|四五", en: "TWO THREE|FOUR FIVE" },
+      { dimension: "chaos", zh: "三四|五六", en: "THREE FOUR|FIVE SIX" },
+      { dimension: "chaos", zh: "四五|六七", en: "FOUR FIVE|SIX SEVEN" },
+      { dimension: "chaos", zh: "五六|七八", en: "FIVE SIX|SEVEN EIGHT" }
+    ],
+    /got 5.*maximum allowed is 4/
+  );
+  await expectCoupletError(
+    "err-dup-zh",
+    [
+      { dimension: "chaos", zh: "一切|基底", en: "ALL THINGS|ONE GROUND" },
+      { dimension: "ix", zh: " 一切 ｜ 基底 ", en: "ALL CHAOS|ONE LIFE" }
+    ],
+    /Duplicate normalized zh/
+  );
+});
+
+test("supports couplet update, appendCouplets dedupe/ID-preservation, clear, list filters, summary, delta, import, and MCP guide", async () => {
+  const { env } = makeEnv();
+  await connectCsteix(env);
+
+  // Create article with default empty couplets.
+  const created = await callMcpTool(env, "csteix_create_wuxu", {
+    slug: "stage-note",
+    title: "Stage Note",
+    dimensions: ["chaos", "spacetime"],
+    writtenAt: "2026-11-22 10:00",
+    bodyZh: "Quiet reflection."
+  });
+  assert.equal(created.isError, false);
+  assert.deepEqual((created.parsed?.article as { couplets: unknown[] }).couplets, []);
+
+  // Mutual exclusion between couplets and appendCouplets.
+  const bothErr = await callMcpTool(env, "csteix_update_wuxu", {
+    slug: "stage-note",
+    couplets: [],
+    appendCouplets: [{ dimension: "chaos", zh: "一切|基底", en: "ALL THINGS|ONE GROUND" }]
+  });
+  assert.equal(bothErr.isError, true);
+  assert.match(bothErr.text, /Cannot provide both 'couplets' and 'appendCouplets'/);
+
+  // Replace couplets with 1 caller-ID couplet and 1 generated-ID couplet.
+  const replaced = await callMcpTool(env, "csteix_update_wuxu", {
+    slug: "stage-note",
+    expectedRevision: 1,
+    couplets: [
+      {
+        id: "custom-couplet-1",
+        dimension: "chaos",
+        zh: "一切|基底",
+        en: "ALL THINGS|ONE GROUND",
+        sourceLine: "Ground note"
+      },
+      {
+        dimension: "spacetime",
+        zh: "涌现|容器",
+        en: "ALL RISING|ONE VESSEL"
+      }
+    ]
+  });
+  assert.equal(replaced.isError, false);
+  const rev2Couplets = (replaced.parsed?.article as { couplets: Array<{ id: string; zh: string }> }).couplets;
+  assert.equal(rev2Couplets.length, 2);
+  assert.equal(rev2Couplets[0].id, "custom-couplet-1");
+  const generatedId2 = rev2Couplets[1].id;
+  assert.ok(generatedId2.length > 0);
+  const updReceipt = replaced.parsed?.receipt as { details?: { coupletCount?: number; changedFields?: string[] } };
+  assert.equal(updReceipt.details?.coupletCount, 2);
+  assert.deepEqual(updReceipt.details?.changedFields, ["couplets"]);
+
+  // Replacing with same (dimension, zh) and omitted id reuses existing id!
+  const reusedOnReplace = await callMcpTool(env, "csteix_update_wuxu", {
+    slug: "stage-note",
+    expectedRevision: 2,
+    couplets: [
+      {
+        dimension: "chaos",
+        zh: "一切|基底",
+        en: "ALL THINGS|ONE GROUND"
+      },
+      {
+        dimension: "spacetime",
+        zh: "涌现|容器",
+        en: "ALL RISING|ONE VESSEL",
+        sourceLine: "Updated source"
+      }
+    ]
+  });
+  assert.equal(reusedOnReplace.isError, false);
+  const rev3Couplets = (reusedOnReplace.parsed?.article as { couplets: Array<{ id: string }> }).couplets;
+  assert.equal(rev3Couplets[0].id, "custom-couplet-1");
+  assert.equal(rev3Couplets[1].id, generatedId2);
+
+  // appendCouplets: updates existing normalized zh (even changing dimension) while preserving ID + adds 2 new = 4 total.
+  const appended = await callMcpTool(env, "csteix_update_wuxu", {
+    slug: "stage-note",
+    expectedRevision: 3,
+    appendCouplets: [
+      {
+        dimension: "ix",
+        zh: " 一切 ｜ 基底 ",
+        en: "ALL CHAOS|ONE GROUND",
+        sourceLine: "Reclassified to IX"
+      },
+      {
+        dimension: "existence",
+        zh: "以身载道|无身则无",
+        en: "BODY CARRIES DAO|NO BODY NO DAO"
+      },
+      {
+        dimension: "ix",
+        zh: "此身有尽|我求无涯",
+        en: "THIS BODY ENDS|IX KNOWS NO END"
+      }
+    ]
+  });
+  assert.equal(appended.isError, false);
+  const rev4Couplets = (appended.parsed?.article as {
+    couplets: Array<{ id: string; dimension: string; zh: string; en: string; sourceLine: string | null }>;
+  }).couplets;
+  assert.equal(rev4Couplets.length, 4);
+  assert.equal(rev4Couplets[0].id, "custom-couplet-1");
+  assert.equal(rev4Couplets[0].dimension, "ix");
+  assert.equal(rev4Couplets[0].en, "ALL CHAOS|ONE GROUND");
+  assert.equal(rev4Couplets[0].sourceLine, "Reclassified to IX");
+
+  // Appending 1 more new zh exceeds 4 and includes measured count.
+  const overflowAppend = await callMcpTool(env, "csteix_update_wuxu", {
+    slug: "stage-note",
+    appendCouplets: [{ dimension: "chaos", zh: "无人编排|自虚无来", en: "WITH NO CONDUCTOR|ALL COMES FROM VOID" }]
+  });
+  assert.equal(overflowAppend.isError, true);
+  assert.match(overflowAppend.text, /combined total would be 5.*maximum of 4/);
+
+  // Second article without couplets to test filters, summary, resources.
+  await callMcpTool(env, "csteix_create_wuxu", {
+    slug: "plain-note",
+    title: "Plain Note",
+    dimensions: ["chaos"],
+    writtenAt: "2026-11-22 11:00",
+    bodyZh: "No couplets here."
+  });
+
+  // listWuxu hasCouplets true / false and query matching couplets_json.
+  const listWithCouplets = await callMcpTool(env, "csteix_list_wuxu", { hasCouplets: true });
+  assert.equal((listWithCouplets.parsed?.items as unknown[]).length, 1);
+  assert.equal((listWithCouplets.parsed?.items as Array<{ slug: string }>)[0].slug, "stage-note");
+
+  const listWithoutCouplets = await callMcpTool(env, "csteix_list_wuxu", { hasCouplets: false });
+  assert.equal((listWithoutCouplets.parsed?.items as unknown[]).length, 1);
+  assert.equal((listWithoutCouplets.parsed?.items as Array<{ slug: string }>)[0].slug, "plain-note");
+
+  const queryByCoupletEn = await callMcpTool(env, "csteix_list_wuxu", { query: "IX KNOWS NO END" });
+  assert.equal((queryByCoupletEn.parsed?.items as unknown[]).length, 1);
+  assert.equal((queryByCoupletEn.parsed?.items as Array<{ slug: string }>)[0].slug, "stage-note");
+
+  const queryByCoupletZh = await callMcpTool(env, "csteix_list_wuxu", { query: "以身载道|无身则无" });
+  assert.equal((queryByCoupletZh.parsed?.items as unknown[]).length, 1);
+
+  // csteix_get_summary includes coupletCount and coupletsByDimension.
+  const sumRes = await callMcpTool(env, "csteix_get_summary", {});
+  const wuxuSum = sumRes.parsed?.wuxu as {
+    coupletCount: number;
+    coupletsByDimension: Record<string, number>;
+  };
+  assert.equal(wuxuSum.coupletCount, 4);
+  assert.deepEqual(wuxuSum.coupletsByDimension, {
+    chaos: 0,
+    spacetime: 1,
+    existence: 1,
+    ix: 2
+  });
+
+  // Delta sync includes couplets.
+  const deltaRes = await callJson(env, "/sync/csteix/wuxu");
+  assert.equal(deltaRes.status, 200);
+  const deltaArticles = deltaRes.data.articles as Array<{ slug: string; couplets: unknown[] }>;
+  const stageDelta = deltaArticles.find((a) => a.slug === "stage-note");
+  const plainDelta = deltaArticles.find((a) => a.slug === "plain-note");
+  assert.equal(stageDelta?.couplets.length, 4);
+  assert.deepEqual(plainDelta?.couplets, []);
+
+  // MCP resource chaox://wuxu/{slug} appends ## Stage Couplets only when non-empty.
+  const resWithCouplets = await callJson(env, "/mcp", {
+    method: "POST",
+    body: {
+      jsonrpc: "2.0",
+      id: 601,
+      method: "resources/read",
+      params: { uri: "chaox://wuxu/stage-note" }
+    }
+  });
+  const textWith = (resWithCouplets.data.result as { contents: Array<{ text: string }> }).contents[0].text;
+  assert.match(textWith, /## Stage Couplets/);
+  assert.match(textWith, /IX KNOWS NO END/);
+
+  const resWithoutCouplets = await callJson(env, "/mcp", {
+    method: "POST",
+    body: {
+      jsonrpc: "2.0",
+      id: 602,
+      method: "resources/read",
+      params: { uri: "chaox://wuxu/plain-note" }
+    }
+  });
+  const textWithout = (resWithoutCouplets.data.result as { contents: Array<{ text: string }> }).contents[0].text;
+  assert.doesNotMatch(textWithout, /## Stage Couplets/);
+
+  // Clear couplets with couplets: [].
+  const cleared = await callMcpTool(env, "csteix_update_wuxu", {
+    slug: "stage-note",
+    couplets: []
+  });
+  assert.equal(cleared.isError, false);
+  assert.deepEqual((cleared.parsed?.article as { couplets: unknown[] }).couplets, []);
+  assert.equal(
+    (cleared.parsed?.receipt as { details?: { coupletCount?: number } }).details?.coupletCount,
+    0
+  );
+
+  // Import with couplets, idempotent re-import omitting id, and re-import omitting couplets preserves DB couplets.
+  const importRes1 = await callJson(env, "/sync/csteix/wuxu/import", {
+    method: "POST",
+    body: {
+      articles: [
+        {
+          slug: "imported-couplet-note",
+          title: "Imported Couplet",
+          dimensions: ["chaos"],
+          writtenAt: "2026-11-22T12:00:00.000Z",
+          timezone: "Asia/Shanghai",
+          bodyZh: "Imported body.",
+          couplets: [{ dimension: "chaos", zh: "一切|基底", en: "ALL THINGS|ONE GROUND" }]
+        }
+      ]
+    }
+  });
+  assert.equal(importRes1.status, 200);
+  assert.equal(importRes1.data.inserted, 1);
+
+  const importedGet1 = await callMcpTool(env, "csteix_get_wuxu", { slug: "imported-couplet-note" });
+  const importedCoupletId = ((importedGet1.parsed?.couplets as Array<{ id: string }>)[0]).id;
+
+  // Idempotent re-import with same couplet (without id) keeps generated ID and reports unchanged.
+  const importRes2 = await callJson(env, "/sync/csteix/wuxu/import", {
+    method: "POST",
+    body: {
+      articles: [
+        {
+          slug: "imported-couplet-note",
+          title: "Imported Couplet",
+          dimensions: ["chaos"],
+          writtenAt: "2026-11-22T12:00:00.000Z",
+          timezone: "Asia/Shanghai",
+          bodyZh: "Imported body.",
+          couplets: [{ dimension: "chaos", zh: "一切|基底", en: "ALL THINGS|ONE GROUND" }]
+        }
+      ]
+    }
+  });
+  assert.equal(importRes2.status, 200);
+  assert.equal(importRes2.data.unchanged, 1);
+
+  // Re-import omitting couplets field preserves existing couplets_json and reports unchanged.
+  const importRes3 = await callJson(env, "/sync/csteix/wuxu/import", {
+    method: "POST",
+    body: {
+      articles: [
+        {
+          slug: "imported-couplet-note",
+          title: "Imported Couplet",
+          dimensions: ["chaos"],
+          writtenAt: "2026-11-22T12:00:00.000Z",
+          timezone: "Asia/Shanghai",
+          bodyZh: "Imported body."
+        }
+      ]
+    }
+  });
+  assert.equal(importRes3.status, 200);
+  assert.equal(importRes3.data.unchanged, 1);
+  const importedGet2 = await callMcpTool(env, "csteix_get_wuxu", { slug: "imported-couplet-note" });
+  assert.equal(((importedGet2.parsed?.couplets as Array<{ id: string }>)[0]).id, importedCoupletId);
+
+  // MCP resources/list, resources/read for chaox://guide/wuxu-couplets, scoping (?apps=sx), and write_wuxu prompt.
+  const resList = await callJson(env, "/mcp", {
+    method: "POST",
+    body: { jsonrpc: "2.0", id: 700, method: "resources/list" }
+  });
+  const resources = (resList.data.result as { resources: Array<{ uri: string }> }).resources;
+  assert.ok(resources.some((r) => r.uri === "chaox://guide/wuxu-couplets"));
+
+  const scopedResList = await callJson(env, "/mcp?apps=sx", {
+    method: "POST",
+    body: { jsonrpc: "2.0", id: 701, method: "resources/list" }
+  });
+  const scopedResources = (scopedResList.data.result as { resources: Array<{ uri: string }> }).resources;
+  assert.ok(!scopedResources.some((r) => r.uri === "chaox://guide/wuxu-couplets"));
+
+  const scopedGuideRead = await callJson(env, "/mcp?apps=sx", {
+    method: "POST",
+    body: {
+      jsonrpc: "2.0",
+      id: 702,
+      method: "resources/read",
+      params: { uri: "chaox://guide/wuxu-couplets" }
+    }
+  });
+  assert.equal((scopedGuideRead.data.error as { code: number }).code, -32602);
+
+  const guideRead = await callJson(env, "/mcp", {
+    method: "POST",
+    body: {
+      jsonrpc: "2.0",
+      id: 703,
+      method: "resources/read",
+      params: { uri: "chaox://guide/wuxu-couplets" }
+    }
+  });
+  const guideText = (guideRead.data.result as { contents: Array<{ mimeType: string; text: string }> }).contents[0].text;
+  assert.match(guideText, /PivotText/);
+  assert.match(guideText, /VESSEL/);
+  assert.match(guideText, /WEIGHT/);
+  assert.match(guideText, /STANDING/);
+  assert.match(guideText, /THIS BODY ENDS\|IX KNOWS NO END/);
+
+  const promptRes = await callJson(env, "/mcp", {
+    method: "POST",
+    body: {
+      jsonrpc: "2.0",
+      id: 704,
+      method: "prompts/get",
+      params: { name: "write_wuxu", arguments: { topic: "evening stillness" } }
+    }
+  });
+  const promptText = (promptRes.data.result as { messages: Array<{ content: { text: string } }> }).messages[0].content.text;
+  assert.match(promptText, /chaox:\/\/guide\/wuxu-couplets/);
+  assert.match(promptText, /0-2 timeless bilingual Stage Couplets/);
 });
