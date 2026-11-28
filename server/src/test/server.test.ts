@@ -147,7 +147,12 @@ test("supports full SX + BX snapshot upload, MCP tools/resources/prompts, optimi
     }
   });
   const messages = (promptRes.data.result as { messages: Array<{ content: { text: string } }> }).messages;
-  assert.match(messages[0].content.text, /39.9/);
+  const mealPrompt = messages[0].content.text;
+  assert.match(mealPrompt, /39\.9/);
+  assert.match(mealPrompt, /payment time to sx_record_expense/);
+  assert.match(mealPrompt, /eating time to bx_record_food/);
+  assert.match(mealPrompt, /Ask for missing event times or defer the affected write/);
+  assert.match(mealPrompt, /Beijing time \(Asia\/Shanghai\).*label it pending/);
 
   const sxWrite = await callJson(env, "/mcp", {
     method: "POST",
@@ -1113,7 +1118,11 @@ test("exposes complete SX MCP tool & property descriptions and fieldGuide in sx_
         summaryCurrency: "CNY",
         supportedCurrencies: ["CNY", "USD"],
         projects: [{ name: "EatingDrinkingOut", currency: "CNY", supportsExpense: true, supportsIncome: false }],
-        tags: ["Lunch"]
+        tags: ["Lunch"],
+        rules: [
+          "Expenses use local calendar date + 24-hour clock precision, displayed as YYYY-MM-DD-HH where the trailing two digits are the 00-23 local hour (never minutes or an index; 00 means midnight or hour unknown).",
+          "Omit currency to inherit the project's default currency."
+        ]
       },
       summary: { timeZoneIdentifier: "Asia/Shanghai", summaryCurrency: "CNY", expense: {}, income: {} }
     }
@@ -1171,6 +1180,7 @@ test("exposes complete SX MCP tool & property descriptions and fieldGuide in sx_
   assert.ok(recordExpense?.inputSchema?.properties?.hour);
   assert.ok(recordExpense?.inputSchema?.properties?.skipCredential);
   assert.match(recordExpense.description ?? "", /YYYY-MM-DD-HH/);
+  assert.match(recordExpense.inputSchema?.properties?.hour?.description ?? "", /Use 0 for the midnight hour/);
   assert.match(recordExpense.description ?? "", /auto-binds.*1 linked credential/i);
   assert.match(recordExpense.description ?? "", /credentialSelectionRequired=true/);
   assert.match(recordExpense.description ?? "", /NEVER create a new credential/i);
@@ -1201,6 +1211,7 @@ test("exposes complete SX MCP tool & property descriptions and fieldGuide in sx_
     body: { jsonrpc: "2.0", id: 71, method: "tools/call", params: { name: "sx_get_catalog", arguments: {} } }
   });
   const catalogData = JSON.parse(((catalogRes.data.result as { content: Array<{ text: string }> }).content[0]).text) as {
+    rules?: string[];
     fieldGuide?: {
       expenseDisplayDateFormat?: string;
       expenseWriteFields?: { credentialId?: string; skipCredential?: string };
@@ -1208,6 +1219,9 @@ test("exposes complete SX MCP tool & property descriptions and fieldGuide in sx_
     };
   };
   assert.match(catalogData.fieldGuide?.expenseDisplayDateFormat ?? "", /YYYY-MM-DD-HH/);
+  assert.equal(catalogData.rules?.length, 2);
+  assert.match(catalogData.rules?.[0] ?? "", /use 00 only for a known payment in the midnight hour/);
+  assert.equal(catalogData.rules?.[1], "Omit currency to inherit the project's default currency.");
   assert.match(catalogData.fieldGuide?.expenseWriteFields?.credentialId ?? "", /1 linked credential/i);
   assert.ok(catalogData.fieldGuide?.expenseWriteFields?.skipCredential);
   assert.ok((catalogData.fieldGuide?.commonPitfalls?.length ?? 0) >= 5);
@@ -2715,4 +2729,416 @@ test("enforces SX default credential binding (1 auto-bind, N prompt, 0 unbound),
   assert.equal(scopeDisabledRes.parsed.queued, true);
   assert.equal(scopeDisabledRes.parsed.credentialId, null);
   assert.equal(scopeDisabledRes.parsed.credentialResolution, "credentials_scope_disabled");
+});
+
+test("normalizes SX slogan language/rules/priorities and applies pair-aware pending overlay in sx_list_slogans", async () => {
+  const env = makeEnv();
+  const callTool = async (id: number, name: string, args: Record<string, unknown>) => {
+    const res = await callJson(env, "/mcp", {
+      method: "POST",
+      body: { jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } }
+    });
+    const result = res.data.result as { isError?: boolean; content: Array<{ text: string }> };
+    const text = result.content[0]?.text ?? "";
+    let parsed: Record<string, unknown> = {};
+    try {
+      parsed = JSON.parse(text) as Record<string, unknown>;
+    } catch {
+      parsed = { text };
+    }
+    return { isError: result.isError, parsed, text };
+  };
+
+  // Verify updated tool schemas & docs for all four slogan tools.
+  const toolsRes = await callJson(env, "/mcp", {
+    method: "POST",
+    body: { jsonrpc: "2.0", id: 1500, method: "tools/list" }
+  });
+  const tools = (
+    toolsRes.data.result as {
+      tools: Array<{
+        name: string;
+        description?: string;
+        inputSchema?: { properties?: Record<string, { description?: string; enum?: string[] }> };
+      }>;
+    }
+  ).tools;
+  for (const name of ["sx_list_slogans", "sx_create_slogan", "sx_update_slogan", "sx_delete_slogan"]) {
+    const tool = tools.find((t) => t.name === name);
+    assert.ok(tool, `Missing tool ${name}`);
+    for (const [propName, propSchema] of Object.entries(tool.inputSchema?.properties ?? {})) {
+      assert.ok(
+        typeof propSchema.description === "string" && propSchema.description.trim().length > 0,
+        `Missing property description on ${name}.${propName}`
+      );
+    }
+  }
+  const createSloganTool = tools.find((t) => t.name === "sx_create_slogan");
+  assert.deepEqual(createSloganTool?.inputSchema?.properties?.ruleType?.enum, [
+    "default",
+    "time_of_day",
+    "solar_term",
+    "date_specific",
+    "holiday"
+  ]);
+  assert.ok(createSloganTool?.inputSchema?.properties?.textEn);
+  assert.ok(createSloganTool?.inputSchema?.properties?.pairId);
+  assert.match(createSloganTool?.inputSchema?.properties?.priority?.description ?? "", /lower integer takes precedence/i);
+  assert.doesNotMatch(createSloganTool?.inputSchema?.properties?.ruleType?.description ?? "", /always/i);
+
+  const updateSloganTool = tools.find((t) => t.name === "sx_update_slogan");
+  assert.deepEqual(updateSloganTool?.inputSchema?.properties?.ruleType?.enum, [
+    "default",
+    "time_of_day",
+    "solar_term",
+    "date_specific",
+    "holiday"
+  ]);
+  assert.ok(updateSloganTool?.inputSchema?.properties?.textZh);
+  assert.ok(updateSloganTool?.inputSchema?.properties?.textEn);
+  assert.match(updateSloganTool?.description ?? "", /pairId/i);
+
+  // Upload SX snapshot with committed bilingual pair, solo zh slogan, and an unpaired slogan.
+  await callJson(env, "/sync/sx/snapshot", {
+    method: "PUT",
+    body: {
+      bundleId: "ai.chaox.sx",
+      appVersion: "1.3.0",
+      permission: "readWrite",
+      policy: {
+        allowRead: true,
+        allowCreate: true,
+        allowUpdate: true,
+        allowDelete: true,
+        allowedDomains: ["projects", "expenses", "incomes", "tags", "slogans"],
+        consentAcknowledged: true
+      },
+      capabilities: ["projects", "expenses", "incomes", "tags", "slogans"],
+      catalog: { timeZoneIdentifier: "Asia/Shanghai", summaryCurrency: "CNY", projects: [] },
+      summary: { summaryCurrency: "CNY", expense: {}, income: {} },
+      datasets: {
+        slogans: [
+          {
+            id: 101,
+            language: "zh",
+            text: "早安",
+            emoji: "☀️",
+            ruleType: "time_of_day",
+            ruleValue: '{"start":6,"end":11}',
+            priority: 5,
+            isEnabled: true,
+            pairId: "pair-morning"
+          },
+          {
+            id: 102,
+            language: "en",
+            text: "Good morning",
+            emoji: "☀️",
+            ruleType: "time_of_day",
+            ruleValue: '{"start":6,"end":11}',
+            priority: 5,
+            isEnabled: true,
+            pairId: "pair-morning"
+          },
+          {
+            id: 103,
+            language: "zh",
+            text: "元旦快乐",
+            emoji: "🎉",
+            ruleType: "date_specific",
+            ruleValue: '{"month":1,"day":1}',
+            priority: 1,
+            isEnabled: true,
+            pairId: "pair-newyear"
+          },
+          {
+            id: 104,
+            language: "zh",
+            text: "除夕团圆",
+            emoji: "🏮",
+            ruleType: "holiday",
+            ruleValue: '{"year":2026,"month":2,"day":16}',
+            priority: 1,
+            isEnabled: true,
+            pairId: "pair-cny"
+          },
+          {
+            id: 105,
+            language: "en",
+            text: "Reunion Eve",
+            emoji: "🏮",
+            ruleType: "holiday",
+            ruleValue: '{"year":2026,"month":2,"day":16}',
+            priority: 1,
+            isEnabled: true,
+            pairId: "pair-cny"
+          },
+          {
+            id: 106,
+            language: "zh",
+            text: "保持清醒",
+            emoji: null,
+            ruleType: "default",
+            ruleValue: "{}",
+            priority: 10,
+            isEnabled: true,
+            pairId: null
+          }
+        ]
+      }
+    }
+  });
+
+  // 1) Normalization on create: zh-Hans -> zh, always -> default + "{}", ascending priority defaults.
+  const createAlways = await callTool(1501, "sx_create_slogan", {
+    text: "日常自律",
+    language: "zh-Hans",
+    ruleType: "always",
+    ruleValue: "",
+    requestId: "slo-norm-always"
+  });
+  assert.equal(createAlways.isError, undefined);
+  assert.deepEqual(createAlways.parsed.normalizedPayload, {
+    text: "日常自律",
+    language: "zh",
+    ruleType: "default",
+    ruleValue: "{}",
+    priority: 10,
+    isEnabled: true
+  });
+
+  // 2) Shorthand MM-DD -> JSON and YYYY-MM-DD -> JSON + ascending priority defaults.
+  const createDateShorthand = await callTool(1502, "sx_create_slogan", {
+    text: "劳动节快乐",
+    language: "zh-CN",
+    ruleType: "date_specific",
+    ruleValue: "05-01",
+    requestId: "slo-date-shorthand"
+  });
+  assert.equal(createDateShorthand.isError, undefined);
+  assert.equal((createDateShorthand.parsed.normalizedPayload as Record<string, unknown>).language, "zh");
+  assert.equal((createDateShorthand.parsed.normalizedPayload as Record<string, unknown>).ruleType, "date_specific");
+  assert.equal((createDateShorthand.parsed.normalizedPayload as Record<string, unknown>).ruleValue, '{"month":5,"day":1}');
+  assert.equal((createDateShorthand.parsed.normalizedPayload as Record<string, unknown>).priority, 1);
+
+  const createHolidayShorthand = await callTool(1503, "sx_create_slogan", {
+    text: "Lunar New Year",
+    language: "en-US",
+    ruleType: "holiday",
+    ruleValue: "2026-02-17",
+    requestId: "slo-holiday-shorthand"
+  });
+  assert.equal(createHolidayShorthand.isError, undefined);
+  assert.equal((createHolidayShorthand.parsed.normalizedPayload as Record<string, unknown>).language, "en");
+  assert.equal(
+    (createHolidayShorthand.parsed.normalizedPayload as Record<string, unknown>).ruleValue,
+    '{"year":2026,"month":2,"day":17}'
+  );
+  assert.equal((createHolidayShorthand.parsed.normalizedPayload as Record<string, unknown>).priority, 1);
+
+  // 3) JSON ruleValue normalization for solar_term, time_of_day (overnight), and ranged date_specific/holiday.
+  const createSolar = await callTool(1504, "sx_create_slogan", {
+    text: "立春万物生",
+    ruleType: "solar_term",
+    ruleValue: '{"term":" 立春 "}',
+    requestId: "slo-solar"
+  });
+  assert.equal(createSolar.isError, undefined);
+  assert.equal((createSolar.parsed.normalizedPayload as Record<string, unknown>).ruleValue, '{"term":"立春"}');
+  assert.equal((createSolar.parsed.normalizedPayload as Record<string, unknown>).priority, 3);
+
+  const createOvernight = await callTool(1505, "sx_create_slogan", {
+    text: "夜深了，早点休息",
+    textEn: "Late night, get some rest",
+    emoji: "🌙",
+    ruleType: "time_of_day",
+    ruleValue: '{"start":22,"end":6}',
+    requestId: "slo-bilingual-pair"
+  });
+  assert.equal(createOvernight.isError, undefined);
+  const pairPayload = createOvernight.parsed.normalizedPayload as Record<string, unknown>;
+  assert.equal(pairPayload.language, "zh");
+  assert.equal(pairPayload.textEn, "Late night, get some rest");
+  assert.equal(pairPayload.ruleValue, '{"start":22,"end":6}');
+  assert.equal(pairPayload.priority, 5);
+  assert.ok(typeof pairPayload.pairId === "string" && pairPayload.pairId.length > 0);
+
+  const createCrossYearHoliday = await callTool(1506, "sx_create_slogan", {
+    text: "跨年假期",
+    ruleType: "holiday",
+    ruleValue: '{"year":2026,"month":12,"day":30,"endMonth":1,"endDay":2}',
+    priority: 2,
+    pairId: "custom-pair-2026",
+    requestId: "slo-cross-year"
+  });
+  assert.equal(createCrossYearHoliday.isError, undefined);
+  assert.equal(
+    (createCrossYearHoliday.parsed.normalizedPayload as Record<string, unknown>).ruleValue,
+    '{"year":2026,"month":12,"day":30,"endMonth":1,"endDay":2}'
+  );
+  assert.equal((createCrossYearHoliday.parsed.normalizedPayload as Record<string, unknown>).priority, 2);
+  assert.equal((createCrossYearHoliday.parsed.normalizedPayload as Record<string, unknown>).pairId, "custom-pair-2026");
+
+  // 4) Invalid inputs are rejected cleanly with actionable errors.
+  const invalidCases: Array<{ name: string; args: Record<string, unknown>; pattern: RegExp }> = [
+    { name: "sx_create_slogan", args: { text: "Test", language: "fr" }, pattern: /Unsupported slogan language/i },
+    { name: "sx_create_slogan", args: { text: "Test", language: "   " }, pattern: /cannot be empty/i },
+    { name: "sx_create_slogan", args: { text: "Test", ruleType: "weekly" }, pattern: /Invalid slogan ruleType/i },
+    { name: "sx_create_slogan", args: { text: "Test", ruleType: "default", ruleValue: '{"a":1}' }, pattern: /empty JSON/i },
+    {
+      name: "sx_create_slogan",
+      args: { text: "Test", ruleType: "time_of_day", ruleValue: '{"start":8,"end":8}' },
+      pattern: /start != end/i
+    },
+    {
+      name: "sx_create_slogan",
+      args: { text: "Test", ruleType: "time_of_day", ruleValue: '{"start":0,"end":24}' },
+      pattern: /0 and 23/i
+    },
+    { name: "sx_create_slogan", args: { text: "Test", ruleType: "solar_term", ruleValue: "立春" }, pattern: /term/i },
+    {
+      name: "sx_create_slogan",
+      args: { text: "Test", ruleType: "date_specific", ruleValue: "02-30" },
+      pattern: /between 1 and 29/i
+    },
+    {
+      name: "sx_create_slogan",
+      args: { text: "Test", ruleType: "date_specific", ruleValue: '{"month":5,"day":1,"endMonth":5}' },
+      pattern: /endMonth.*endDay/i
+    },
+    {
+      name: "sx_create_slogan",
+      args: { text: "Test", ruleType: "holiday", ruleValue: "2025-02-29" },
+      pattern: /between 1 and 28/i
+    },
+    {
+      name: "sx_create_slogan",
+      args: { text: "English", language: "en", textEn: "Duplicate" },
+      pattern: /only supported when 'language' is 'zh'/i
+    },
+    { name: "sx_create_slogan", args: { text: "Bad prio", priority: 1.5 }, pattern: /integer/i },
+    { name: "sx_update_slogan", args: { id: 101 }, pattern: /at least one field/i },
+    { name: "sx_update_slogan", args: { id: 101, ruleType: "solar_term" }, pattern: /term/i },
+    { name: "sx_list_slogans", args: { language: "ja" }, pattern: /Unsupported slogan language/i }
+  ];
+  for (let i = 0; i < invalidCases.length; i += 1) {
+    const tc = invalidCases[i];
+    const res = await callTool(1510 + i, tc.name, tc.args);
+    assert.equal(res.isError, true, `Expected error for case #${i} (${tc.name})`);
+    assert.match(res.text, tc.pattern, `Unexpected error text for case #${i}: ${res.text}`);
+  }
+
+  // 5) Pair-aware pending updates:
+  //    a) Updating shared metadata + both language copies on pair-morning (id 101) propagates to id 102.
+  const updPair = await callTool(1540, "sx_update_slogan", {
+    id: 101,
+    textZh: "清晨好状态",
+    textEn: "Fresh morning start",
+    emoji: null,
+    priority: 4,
+    isEnabled: false,
+    requestId: "slo-upd-pair"
+  });
+  assert.equal(updPair.isError, undefined);
+  assert.deepEqual(updPair.parsed.normalizedPayload, {
+    id: 101,
+    textZh: "清晨好状态",
+    textEn: "Fresh morning start",
+    emoji: "",
+    priority: 4,
+    isEnabled: false
+  });
+
+  //    b) Adding English copy + shorthand ruleValue to solo zh slogan (id 103, date_specific).
+  const updAddEn = await callTool(1541, "sx_update_slogan", {
+    id: 103,
+    textEn: "Happy New Year",
+    ruleValue: "01-02",
+    requestId: "slo-upd-add-en"
+  });
+  assert.equal(updAddEn.isError, undefined);
+  assert.deepEqual(updAddEn.parsed.normalizedPayload, {
+    id: 103,
+    textEn: "Happy New Year",
+    ruleValue: '{"month":1,"day":2}'
+  });
+
+  //    c) Deleting one side of pair-cny (id 104) removes BOTH 104 and sibling 105 in sx_list_slogans.
+  const delPair = await callTool(1542, "sx_delete_slogan", {
+    id: 104,
+    requestId: "slo-del-pair"
+  });
+  assert.equal(delPair.isError, undefined);
+
+  // 6) Verify sx_list_slogans pending overlay + normalized language filters.
+  const listAll = await callTool(1550, "sx_list_slogans", {});
+  assert.equal(listAll.isError, undefined);
+  const allItems = listAll.parsed.items as Array<{
+    id: number;
+    language: string;
+    text: string;
+    emoji?: string | null;
+    ruleType: string;
+    ruleValue: string;
+    priority: number;
+    isEnabled: boolean;
+    pairId?: string | null;
+    pendingStatus?: string;
+  }>;
+
+  // Deleted pair-cny (104 & 105) must both be absent; unpaired 106 stays intact.
+  assert.equal(allItems.some((s) => s.id === 104 || s.id === 105 || s.pairId === "pair-cny"), false);
+  assert.equal(allItems.some((s) => s.id === 106 && s.text === "保持清醒"), true);
+
+  // Pending bilingual create emitted both zh and en rows sharing pairId.
+  const createdPairRows = allItems.filter((s) => s.pairId === pairPayload.pairId);
+  assert.equal(createdPairRows.length, 2);
+  assert.equal(createdPairRows.find((s) => s.language === "zh")?.text, "夜深了，早点休息");
+  assert.equal(createdPairRows.find((s) => s.language === "en")?.text, "Late night, get some rest");
+  assert.ok(createdPairRows.every((s) => s.pendingStatus === "queued_create" && s.priority === 5 && s.emoji === "🌙"));
+
+  // Updated pair-morning propagated shared fields (emoji cleared, priority=4, isEnabled=false) & textZh/textEn.
+  const morningZh = allItems.find((s) => s.id === 101);
+  const morningEn = allItems.find((s) => s.id === 102);
+  assert.ok(morningZh && morningEn);
+  assert.equal(morningZh.text, "清晨好状态");
+  assert.equal(morningEn.text, "Fresh morning start");
+  assert.equal(morningZh.emoji, null);
+  assert.equal(morningEn.emoji, null);
+  assert.equal(morningZh.priority, 4);
+  assert.equal(morningEn.priority, 4);
+  assert.equal(morningZh.isEnabled, false);
+  assert.equal(morningEn.isEnabled, false);
+  assert.equal(morningZh.pendingStatus, "queued_update");
+  assert.equal(morningEn.pendingStatus, "queued_update");
+
+  // Solo zh slogan 103 got normalized ruleValue and appended pending en counterpart sharing pair-newyear.
+  const newYearRows = allItems.filter((s) => s.pairId === "pair-newyear");
+  assert.equal(newYearRows.length, 2);
+  const newYearZh = newYearRows.find((s) => s.language === "zh");
+  const newYearEn = newYearRows.find((s) => s.language === "en");
+  assert.ok(newYearZh && newYearEn);
+  assert.equal(newYearZh.id, 103);
+  assert.equal(newYearZh.ruleValue, '{"month":1,"day":2}');
+  assert.equal(newYearEn.id, -1);
+  assert.equal(newYearEn.text, "Happy New Year");
+  assert.equal(newYearEn.ruleType, "date_specific");
+  assert.equal(newYearEn.ruleValue, '{"month":1,"day":2}');
+  assert.equal(newYearEn.emoji, "🎉");
+  assert.equal(newYearEn.pendingStatus, "queued_create");
+
+  // Normalized language filter: 'zh-Hans' matches 'zh' rows only; 'en-GB' matches 'en' rows only.
+  const listZh = await callTool(1551, "sx_list_slogans", { language: "zh-Hans" });
+  const zhItems = listZh.parsed.items as Array<{ language: string; text: string }>;
+  assert.ok(zhItems.length > 0);
+  assert.ok(zhItems.every((s) => s.language === "zh"));
+  assert.ok(zhItems.some((s) => s.text === "夜深了，早点休息"));
+
+  const listEn = await callTool(1552, "sx_list_slogans", { language: "en-GB", enabledOnly: true });
+  const enItems = listEn.parsed.items as Array<{ language: string; text: string; isEnabled: boolean }>;
+  assert.ok(enItems.length > 0);
+  assert.ok(enItems.every((s) => s.language === "en" && s.isEnabled));
+  assert.ok(enItems.some((s) => s.text === "Late night, get some rest"));
+  assert.ok(enItems.some((s) => s.text === "Happy New Year"));
+  assert.equal(enItems.some((s) => s.text === "Fresh morning start"), false);
 });

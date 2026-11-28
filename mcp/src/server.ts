@@ -113,7 +113,7 @@ export function createChaoxMcpServer(client: ChaoxExchangeClient): McpServer {
     {
       title: "Record SX Expense",
       description:
-        "Queue an expense write in sx/inbox for Spending X. Call sx_get_catalog first. SX stores expenses with date + 24-hour local hour (00-23) precision, displayed as 'YYYY-MM-DD-HH' (the last 2 digits are the 24-hour local hour, NEVER minutes or a sequence number; '00' = midnight/hour unknown).",
+        "Queue an expense write in sx/inbox for Spending X. Call sx_get_catalog first. SX displays the payment date and hour as 'YYYY-MM-DD-HH' in the app timezone. Ask for the payment time or defer the write if the hour is unknown.",
       inputSchema: {
         amount: z
           .number()
@@ -141,7 +141,7 @@ export function createChaoxMcpServer(client: ChaoxExchangeClient): McpServer {
           .string()
           .optional()
           .describe(
-            "Optional expense date/time: ISO-8601 with offset ('2026-11-22T12:00:00+08:00'), SX display format ('2026-11-22-12'), local ('2026-11-22 12:00'), or 'YYYY-MM-DD' (defaults to local 00:00 unless 'hour' is passed). Omit both date and hour for now."
+            "Payment time as ISO-8601 with offset, SX format 'YYYY-MM-DD-HH', local 'YYYY-MM-DD HH:mm', or 'YYYY-MM-DD' plus a known hour. A bare date becomes local midnight. Omitting both date and hour uses the device's current time."
           ),
         hour: z
           .number()
@@ -150,7 +150,7 @@ export function createChaoxMcpServer(client: ChaoxExchangeClient): McpServer {
           .max(23)
           .optional()
           .describe(
-            "Optional 24-hour local clock hour (0..23) in SX's timezone — sets the trailing '-HH' in 'YYYY-MM-DD-HH' (0=midnight/unknown, 9=09:00, 12=12:00 noon, 19=19:00)"
+            "Known 24-hour payment hour (0..23) in SX's timezone. Use 0 for the midnight hour. Without a date, applies to today."
           ),
         requestId: z
           .string()
@@ -234,7 +234,7 @@ export function createChaoxMcpServer(client: ChaoxExchangeClient): McpServer {
     {
       title: "Record BX Food",
       description:
-        "Queue a meal/food intake log in bx/inbox for Body X. Omit mealType to infer from recordedAt; omit calories if unknown.",
+        "Queue a meal/food intake log in bx/inbox for Body X. Ask for the eating time or defer the write when it is unknown. Omit mealType to infer from recordedAt; omit calories if unknown.",
       inputSchema: {
         name: z.string().min(1).describe("Food or meal description"),
         mealType: z
@@ -246,7 +246,7 @@ export function createChaoxMcpServer(client: ChaoxExchangeClient): McpServer {
           .min(0)
           .optional()
           .describe("Estimated or exact kilocalories (>= 0, optional)"),
-        recordedAt: z.string().optional().describe("ISO-8601 timestamp (defaults to now)"),
+        recordedAt: z.string().optional().describe("Actual eating time as an ISO-8601 timestamp with offset. Omitting it uses the device's current time."),
         requestId: z.string().optional().describe("Optional idempotency key"),
         client: z.string().optional().describe("Calling AI client identifier")
       }

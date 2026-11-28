@@ -464,4 +464,72 @@ struct AgentExchangeStoreTests {
             #expect(enPrompt.contains("Option A"))
         }
     }
+
+    @Test("AgentSetupGuide renders localized agent configuration guides without leaking sync token")
+    func rendersLocalizedAgentConfigGuides() throws {
+        let enLocale = Locale(identifier: "en")
+        let zhLocale = Locale(identifier: "zh-Hans")
+
+        for (app, expectedName) in [
+            (AgentAppID.sx, "SX (Spending X)"),
+            (AgentAppID.bx, "BX (Body X)"),
+            (AgentAppID.csteix, "CSTEIX"),
+        ] {
+            let enGuide = try #require(
+                AgentSetupGuide.agentConfigGuide(
+                    for: app,
+                    urlString: "https://agent.example.com",
+                    token: "sync-secret-never-leak",
+                    tokenMode: .split,
+                    mcpToken: "mcp-secret-token-123",
+                    locale: enLocale
+                )
+            )
+            let zhGuide = try #require(
+                AgentSetupGuide.agentConfigGuide(
+                    for: app,
+                    urlString: "https://agent.example.com",
+                    token: "sync-secret-never-leak",
+                    tokenMode: .split,
+                    mcpToken: "mcp-secret-token-123",
+                    locale: zhLocale
+                )
+            )
+
+            for guide in [enGuide, zhGuide] {
+                #expect(guide.contains(expectedName))
+                #expect(guide.contains("https://agent.example.com/mcp"))
+                #expect(guide.contains("Bearer mcp-secret-token-123"))
+                #expect(!guide.contains("sync-secret-never-leak"))
+                #expect(guide.contains("chaox_get_status"))
+                #expect(guide.contains("chaox://guide/skill"))
+            }
+
+            #expect(enGuide != zhGuide)
+            #expect(enGuide.contains("copy this guide and send it to any AI assistant"))
+            #expect(zhGuide.contains("\u{53EF}\u{76F4}\u{63A5}\u{590D}\u{5236}"))
+        }
+
+        let placeholderGuide = try #require(
+            AgentSetupGuide.agentConfigGuide(
+                for: .sx,
+                urlString: "https://agent.example.com",
+                token: "sync-secret-never-leak",
+                tokenMode: .split,
+                mcpToken: nil,
+                locale: enLocale
+            )
+        )
+        #expect(!placeholderGuide.contains("sync-secret-never-leak"))
+        #expect(placeholderGuide.contains(AgentEndpointParser.splitMCPTokenPlaceholder))
+
+        #expect(
+            AgentSetupGuide.agentConfigGuide(
+                for: .sx,
+                urlString: "not-a-url",
+                token: "tok",
+                locale: enLocale
+            ) == nil
+        )
+    }
 }

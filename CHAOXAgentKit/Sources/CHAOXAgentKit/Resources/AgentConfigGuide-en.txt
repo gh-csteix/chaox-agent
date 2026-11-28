@@ -1,0 +1,15 @@
+You can copy this guide and send it to any AI assistant (such as Claude, ChatGPT, Cursor, Codex, or OpenClaw) so it can configure the connection for you automatically.
+
+Please configure my CHAOX Agent (`chaox-agent/v1`) MCP server so you can connect to my **{APP_NAME}** (the same server also supports SX, BX, and CSTEIX together):
+
+### 1. Add the MCP Server Configuration
+Add the following Streamable HTTP MCP server to your AI client's MCP configuration (or enter the same server URL and `Authorization` header if your client uses a GUI):
+
+```json
+{MCP_CONFIG_JSON}
+```
+
+### 2. Verify Connection & Usage Rules
+- After saving and reloading MCP, call `chaox_get_status` (or list available tools) to confirm the connection works.
+- Before making changes, read the MCP resource `chaox://guide/skill` (or https://github.com/gh-csteix/chaox-agent/blob/main/mcp/SKILL.md) to follow each app's guidelines.
+- Data permissions and allowed scopes are controlled in real time from Data Permissions inside the iOS app. Keep this token private.

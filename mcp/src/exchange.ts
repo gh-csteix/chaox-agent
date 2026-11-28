@@ -604,6 +604,13 @@ export class ChaoxExchangeClient {
         `Missing ${this.appDir("sx")}/catalog.json. Open SX to publish an initial snapshot.`
       );
     }
+    if (Array.isArray(catalog.rules)) {
+      catalog.rules = catalog.rules.map((rule) =>
+        typeof rule === "string"
+          ? rule.replace("00 means midnight or hour unknown", "use 00 only for a known payment in the midnight hour")
+          : rule
+      );
+    }
     return catalog;
   }
 

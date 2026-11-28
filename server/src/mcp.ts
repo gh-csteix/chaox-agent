@@ -437,12 +437,14 @@ async function dispatchTool(
     case "sx_create_slogan":
       return store.sx.createSlogan({
         text: String(args.text ?? ""),
+        textEn: optStr(args, "textEn"),
         language: optStr(args, "language"),
         emoji: optStr(args, "emoji"),
         ruleType: optStr(args, "ruleType"),
         ruleValue: optStr(args, "ruleValue"),
         priority: optNum(args, "priority"),
         isEnabled: optBool(args, "isEnabled"),
+        pairId: optStr(args, "pairId") ?? optStr(args, "pairID"),
         requestId: optStr(args, "requestId"),
         client: optStr(args, "client")
       });
@@ -450,6 +452,8 @@ async function dispatchTool(
       return store.sx.updateSlogan({
         id: Number(args.id),
         text: optStr(args, "text"),
+        textZh: optStr(args, "textZh"),
+        textEn: optStr(args, "textEn"),
         language: optStr(args, "language"),
         emoji: args.emoji === null ? null : optStr(args, "emoji"),
         ruleType: optStr(args, "ruleType"),
@@ -1041,9 +1045,10 @@ async function handleSingleRpc(
         const text =
           `Log this meal across SX and BX using chaox-agent:\n` +
           `1. Call chaox_get_briefing (or chaox_get_status + sx_get_catalog + bx_get_summary) to inspect permitted apps, timezones, and active meal project names.\n` +
-          `2. Expense hint: amount=${promptArgs.amount ?? "infer"}, currency=${promptArgs.currency ?? "default"}. Pass the meal's local hour via 'date' + 'hour' (0..23) or ISO-8601 with offset, and put dish/merchant details in 'note'.\n` +
-          `3. Meal hint: ${promptArgs.meal_description ?? "analyze photo ingredients and state estimated kcal transparently"}.\n` +
-          `4. Call sx_record_expense and bx_record_food with matching requestId prefix and report updated optimistic totals.`;
+          `2. Expense hint: amount=${promptArgs.amount ?? "infer"}, currency=${promptArgs.currency ?? "default"}. Pass the payment time to sx_record_expense and put dish/merchant details in 'note'.\n` +
+          `3. Meal hint: ${promptArgs.meal_description ?? "analyze photo ingredients and state estimated kcal transparently"}. Pass the eating time to bx_record_food. Verify payment and eating times independently. Keep order and message times separate.\n` +
+          `4. Ask for missing event times or defer the affected write. Use an ISO-8601 timestamp with offset for a known clock time, or 'date' plus a known 'hour' for an SX payment known to hour precision. Use a shared requestId prefix for related writes.\n` +
+          `5. Report the time and known precision in Beijing time (Asia/Shanghai) for each queued write and label it pending. Check chaox_get_status with app and requestId for the device receipt, then read the synced record to confirm the stored time.`;
         return rpcResult(id, {
           description: "Cross-app meal photo logging workflow",
           messages: [{ role: "user", content: { type: "text", text } }]

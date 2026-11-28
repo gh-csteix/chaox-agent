@@ -75,6 +75,8 @@ export interface McpToolDefinition {
   inputSchema: Record<string, unknown>;
 }
 
+const BX_EVENT_TIME_FORMATS = "Use ISO-8601 with offset or local 'YYYY-MM-DD HH:mm' in the BX timezone. A bare 'YYYY-MM-DD' becomes local noon.";
+
 const RAW_TOOL_DEFINITIONS: McpToolDefinition[] = [
   {
     name: "chaox_get_status",
@@ -286,12 +288,16 @@ const RAW_TOOL_DEFINITIONS: McpToolDefinition[] = [
   {
     name: "sx_list_slogans",
     title: "List SX Slogans",
-    description: "List Spending X dashboard/context slogans with language, ruleType, ruleValue, priority, and enabled state.",
+    description:
+      "List Spending X dashboard/context slogans with language ('zh' or 'en'), pairId (shared by linked zh/en bilingual pairs), ruleType ('default', 'time_of_day', 'solar_term', 'date_specific', or 'holiday'), JSON ruleValue, ascending priority (lower integer takes precedence), and enabled state. Overlays pending inbox creates, updates, and pair deletes.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: "object",
       properties: {
-        language: { type: "string", description: "Filter by language code, e.g. 'zh-Hans' or 'en'" },
+        language: {
+          type: "string",
+          description: "Filter by language code: 'zh' or 'en' ('zh-Hans'/'zh-CN' normalized to 'zh', 'en-*' normalized to 'en')"
+        },
         enabledOnly: { type: "boolean", description: "If true, return only enabled slogans" },
         query: { type: "string", description: "Case-insensitive substring filter across text, ruleType, and ruleValue" },
         limit: { type: "integer", minimum: 1, maximum: 200, description: "Max items to return (default 50, max 200)" },
@@ -305,7 +311,7 @@ const RAW_TOOL_DEFINITIONS: McpToolDefinition[] = [
     name: "sx_record_expense",
     title: "Record SX Expense",
     description:
-      "Queue a new expense creation in Spending X. Call sx_get_catalog first. IMPORTANT: SX stores expenses with calendar-date + 24-hour local hour (00-23) precision, displayed in the app as 'YYYY-MM-DD-HH' (e.g. '2026-11-22-12' = 12:00 noon, '2026-11-21-00' = midnight/hour unknown — the trailing 2 digits are the HOUR, NEVER minutes or a sequence number). CREDENTIAL BINDING RULE: When SX 'credentials' scope is enabled and 'credentialId' is omitted, the server auto-binds if the project has exactly 1 linked credential; returns queued=false, credentialSelectionRequired=true, and credentialCandidates if multiple credentials are linked so you MUST ask the user to choose and retry with credentialId (or skipCredential=true to leave unbound); and leaves unbound if 0 credentials are linked. NEVER create a new credential without explicit user request. The response always includes the actually bound credentialId (or null).",
+      "Queue a new expense creation in Spending X. Call sx_get_catalog first. SX displays the payment date and hour as 'YYYY-MM-DD-HH' in the app timezone. Ask for the actual payment time or defer the write if the hour is unknown. CREDENTIAL BINDING RULE: When SX 'credentials' scope is enabled and 'credentialId' is omitted, the server auto-binds if the project has exactly 1 linked credential; returns queued=false, credentialSelectionRequired=true, and credentialCandidates if multiple credentials are linked so you MUST ask the user to choose and retry with credentialId (or skipCredential=true to leave unbound); and leaves unbound if 0 credentials are linked. NEVER create a new credential without explicit user request. The response always includes the actually bound credentialId (or null).",
     inputSchema: {
       type: "object",
       required: ["amount", "projectName"],
@@ -352,14 +358,14 @@ const RAW_TOOL_DEFINITIONS: McpToolDefinition[] = [
         date: {
           type: "string",
           description:
-            "Optional expense date/time. Accepted formats: (1) ISO-8601 with timezone offset, e.g. '2026-11-22T12:00:00+08:00' or '...Z'; (2) SX display format 'YYYY-MM-DD-HH' in sx_get_catalog.timeZoneIdentifier, e.g. '2026-11-22-12'; (3) local 'YYYY-MM-DD HH:mm'; (4) calendar date 'YYYY-MM-DD' (pair with 'hour' 0..23 if known; without 'hour', defaults to local 00:00 = 'YYYY-MM-DD-00'). Omit both date and hour to use current time."
+            "Payment time as ISO-8601 with offset, SX display format 'YYYY-MM-DD-HH', local 'YYYY-MM-DD HH:mm', or 'YYYY-MM-DD' plus a known hour. A bare date becomes local midnight. Omitting both date and hour uses the device's current time."
         },
         hour: {
           type: "integer",
           minimum: 0,
           maximum: 23,
           description:
-            "Optional 24-hour local clock hour (0..23) in sx_get_catalog.timeZoneIdentifier. Appears as the trailing 2 digits in SX's 'YYYY-MM-DD-HH' timestamp (0 = 00:00 / hour unknown, 9 = 09:00, 12 = 12:00 noon, 19 = 19:00). Overrides the hour when combined with 'date'; if 'date' is omitted, applies to today in SX's timezone."
+            "Known 24-hour payment hour (0..23) in sx_get_catalog.timeZoneIdentifier. Use 0 for the midnight hour. Overrides the hour when combined with 'date' and applies to today when 'date' is omitted."
         },
         requestId: {
           type: "string",
@@ -411,14 +417,14 @@ const RAW_TOOL_DEFINITIONS: McpToolDefinition[] = [
         date: {
           type: "string",
           description:
-            "New expense date/time in ISO-8601 with offset ('2026-11-22T09:00:00+08:00'), SX format ('2026-11-22-09' or '2026-11-22 09'), local ('2026-11-22 09:00'), or 'YYYY-MM-DD' (defaults to 00:00 local unless 'hour' is passed)"
+            "New payment time as ISO-8601 with offset, SX format 'YYYY-MM-DD-HH', local 'YYYY-MM-DD HH:mm', or 'YYYY-MM-DD' plus a known hour. A bare date becomes local midnight. Omit both date and hour to keep the existing payment time."
         },
         hour: {
           type: "integer",
           minimum: 0,
           maximum: 23,
           description:
-            "New 24-hour local hour (0..23) in SX's timezone. If 'date' is omitted, keeps the expense's existing (or queued) localDate and changes only its hour."
+            "New known 24-hour payment hour (0..23) in SX's timezone. Use 0 for the midnight hour. If 'date' is omitted, keeps the expense's existing (or queued) localDate."
         },
         requestId: { type: "string", description: "Optional idempotency key for safe retries" },
         client: { type: "string", description: "Optional calling AI assistant identifier" }
@@ -767,25 +773,50 @@ const RAW_TOOL_DEFINITIONS: McpToolDefinition[] = [
   {
     name: "sx_create_slogan",
     title: "Create SX Slogan",
-    description: "Create a contextual slogan shown on the Spending X Dashboard.",
+    description:
+      "Create a contextual slogan shown on the Spending X Dashboard. Pass 'textEn' together with a Chinese 'text' (language='zh') to create a linked zh+en bilingual pair sharing one pairId in a single call, or pass 'pairId' to attach to an existing pair. Priority sorts ascending (lower integer takes precedence).",
     inputSchema: {
       type: "object",
       required: ["text"],
       properties: {
-        text: { type: "string", minLength: 1, description: "Slogan display copy" },
-        language: { type: "string", description: "Slogan language code: 'zh-Hans' (default) or 'en'" },
+        text: {
+          type: "string",
+          minLength: 1,
+          description: "Primary slogan display copy (Chinese when language is 'zh', or English when language is 'en')"
+        },
+        textEn: {
+          type: "string",
+          minLength: 1,
+          description:
+            "Optional English counterpart copy to create a linked zh+en bilingual pair sharing one pairId in one call (requires language='zh')"
+        },
+        language: {
+          type: "string",
+          description: "Slogan language code: 'zh' (default) or 'en' ('zh-Hans'/'zh-CN' normalized to 'zh', 'en-*' normalized to 'en')"
+        },
         emoji: { type: "string", description: "Optional leading emoji glyph" },
         ruleType: {
           type: "string",
+          enum: ["default", "time_of_day", "solar_term", "date_specific", "holiday"],
           description:
-            "Display rule: 'always' (default), 'default', 'time_of_day', 'solar_term', 'date_specific', or 'holiday'"
+            "Display rule: 'default' (default fallback), 'time_of_day', 'solar_term', 'date_specific', or 'holiday'"
         },
         ruleValue: {
           type: "string",
-          description: "Rule parameter (e.g. 'MM-DD' for date_specific, hour/window key for time_of_day, or '' for always)"
+          description:
+            "JSON rule parameter matching ruleType: '{}' for 'default', '{\"start\":6,\"end\":11}' for 'time_of_day' (0..23 ints, start != end), '{\"term\":\"立春\"}' for 'solar_term', '{\"month\":1,\"day\":1}' (optional endMonth/endDay; 'MM-DD' shorthand accepted) for 'date_specific', or '{\"year\":2026,\"month\":2,\"day\":17}' (optional endMonth/endDay; 'YYYY-MM-DD' shorthand accepted) for 'holiday'"
         },
-        priority: { type: "integer", description: "Higher integer takes precedence when multiple rules match (default 0)" },
+        priority: {
+          type: "integer",
+          description:
+            "Sort/selection priority where lower integer takes precedence (defaults by ruleType: holiday=1, date_specific=1, solar_term=3, time_of_day=5, default=10)"
+        },
         isEnabled: { type: "boolean", description: "Whether slogan is active (default true)" },
+        pairId: {
+          type: "string",
+          description:
+            "Optional pair identifier linking zh/en bilingual counterparts (auto-generated when creating a pair with textEn)"
+        },
         requestId: { type: "string", description: "Optional idempotency key" },
         client: { type: "string", description: "Optional calling AI assistant identifier" }
       }
@@ -794,22 +825,50 @@ const RAW_TOOL_DEFINITIONS: McpToolDefinition[] = [
   {
     name: "sx_update_slogan",
     title: "Update SX Slogan",
-    description: "Update an existing SX slogan by ID (omitted fields remain unchanged).",
+    description:
+      "Update an existing SX slogan by ID (omitted fields remain unchanged). Updating shared fields (emoji, ruleType, ruleValue, priority, isEnabled) propagates to any linked sibling sharing the same pairId. Pass 'textZh' and/or 'textEn' to update or add the Chinese/English copy of a paired slogan alongside or instead of 'text'.",
     inputSchema: {
       type: "object",
       required: ["id"],
       properties: {
         id: { type: "integer", minimum: 1, description: "Slogan ID from sx_list_slogans" },
-        text: { type: "string", description: "Replacement slogan text" },
-        language: { type: "string", description: "Language code ('zh-Hans' or 'en')" },
-        emoji: { type: ["string", "null"], description: "Emoji glyph, or null to clear" },
+        text: { type: "string", description: "Replacement display copy for the target slogan row" },
+        textZh: {
+          type: "string",
+          description: "Optional Chinese ('zh') copy to update or add on this slogan's bilingual pair"
+        },
+        textEn: {
+          type: "string",
+          description: "Optional English ('en') copy to update or add on this slogan's bilingual pair"
+        },
+        language: {
+          type: "string",
+          description: "Language code: 'zh' or 'en' ('zh-Hans'/'zh-CN' normalized to 'zh', 'en-*' normalized to 'en')"
+        },
+        emoji: {
+          type: ["string", "null"],
+          description: "Emoji glyph, or null/'' to clear (propagates to linked pair sibling)"
+        },
         ruleType: {
           type: "string",
-          description: "'always', 'default', 'time_of_day', 'solar_term', 'date_specific', or 'holiday'"
+          enum: ["default", "time_of_day", "solar_term", "date_specific", "holiday"],
+          description:
+            "Display rule: 'default', 'time_of_day', 'solar_term', 'date_specific', or 'holiday' (propagates to linked pair sibling)"
         },
-        ruleValue: { type: "string", description: "Rule parameter matching ruleType" },
-        priority: { type: "integer", description: "Sort/selection priority integer" },
-        isEnabled: { type: "boolean", description: "Enable or disable this slogan" },
+        ruleValue: {
+          type: "string",
+          description:
+            "JSON rule parameter matching ruleType: '{}' for 'default', '{\"start\":6,\"end\":11}' for 'time_of_day', '{\"term\":\"立春\"}' for 'solar_term', '{\"month\":1,\"day\":1}' ('MM-DD' shorthand accepted) for 'date_specific', or '{\"year\":2026,\"month\":2,\"day\":17}' ('YYYY-MM-DD' shorthand accepted) for 'holiday' (propagates to linked pair sibling)"
+        },
+        priority: {
+          type: "integer",
+          description:
+            "Sort/selection priority integer where lower integer takes precedence (holiday=1, date_specific=1, solar_term=3, time_of_day=5, default=10; propagates to linked pair sibling)"
+        },
+        isEnabled: {
+          type: "boolean",
+          description: "Enable or disable this slogan (propagates to linked pair sibling)"
+        },
         requestId: { type: "string", description: "Optional idempotency key" },
         client: { type: "string", description: "Optional calling AI assistant identifier" }
       }
@@ -818,7 +877,7 @@ const RAW_TOOL_DEFINITIONS: McpToolDefinition[] = [
   {
     name: "sx_delete_slogan",
     title: "Delete SX Slogan (Trash)",
-    description: "Move an SX slogan to 30-day Trash by ID.",
+    description: "Move an SX slogan (and any linked bilingual pair sibling sharing its pairId) to 30-day Trash by ID.",
     annotations: { destructiveHint: true },
     inputSchema: {
       type: "object",
@@ -1131,7 +1190,7 @@ const RAW_TOOL_DEFINITIONS: McpToolDefinition[] = [
   {
     name: "bx_record_food",
     title: "Record BX Food",
-    description: "Queue a meal/food intake log for Body X.",
+    description: "Queue a meal/food intake log for Body X. Ask for the eating time or defer the write when it is unknown.",
     inputSchema: {
       type: "object",
       required: ["name"],
@@ -1142,7 +1201,7 @@ const RAW_TOOL_DEFINITIONS: McpToolDefinition[] = [
         recordedAt: {
           type: "string",
           description:
-            "Timestamp: ISO-8601 with offset ('2026-11-22T12:00:00+08:00'), local 'YYYY-MM-DD HH:mm' in BX timezone, or 'YYYY-MM-DD' (local noon); defaults to now"
+            "Actual eating time. " + BX_EVENT_TIME_FORMATS + " Omitting it uses the device's current time."
         },
         requestId: { type: "string", description: "Optional idempotency key" },
         client: { type: "string", description: "Optional calling AI assistant identifier" }
@@ -1162,7 +1221,7 @@ const RAW_TOOL_DEFINITIONS: McpToolDefinition[] = [
         mealType: { type: "string", enum: ["breakfast", "lunch", "dinner", "snack"] },
         calories: { type: "number", minimum: 0 },
         clearCalories: { type: "boolean" },
-        recordedAt: { type: "string", description: "ISO-8601 with offset, local 'YYYY-MM-DD HH:mm' in BX timezone, or 'YYYY-MM-DD'" },
+        recordedAt: { type: "string", description: "New eating time. " + BX_EVENT_TIME_FORMATS + " Omit to keep the existing time." },
         requestId: { type: "string" },
         client: { type: "string" }
       }
@@ -1196,7 +1255,7 @@ const RAW_TOOL_DEFINITIONS: McpToolDefinition[] = [
         brand: { type: "string", description: "Alias for name if no separate product label" },
         recordedAt: {
           type: "string",
-          description: "ISO-8601 with offset, local 'YYYY-MM-DD HH:mm' in BX timezone, or 'YYYY-MM-DD' (defaults to now)"
+          description: "Application time. " + BX_EVENT_TIME_FORMATS + " Omitting it uses the device's current time."
         },
         requestId: { type: "string" },
         client: { type: "string" }
@@ -1214,7 +1273,7 @@ const RAW_TOOL_DEFINITIONS: McpToolDefinition[] = [
         id: { type: "string", minLength: 1, description: "Skin entry UUID or 'pending:<requestId>'" },
         product: { type: "string", enum: ["sunscreen", "moisturizer", "bodyLotion", "medicine", "other"] },
         name: { type: "string" },
-        recordedAt: { type: "string", description: "ISO-8601 with offset, local 'YYYY-MM-DD HH:mm' in BX timezone, or 'YYYY-MM-DD'" },
+        recordedAt: { type: "string", description: "New application time. " + BX_EVENT_TIME_FORMATS + " Omit to keep the existing time." },
         requestId: { type: "string" },
         client: { type: "string" }
       }
@@ -1248,7 +1307,7 @@ const RAW_TOOL_DEFINITIONS: McpToolDefinition[] = [
         note: { type: "string" },
         recordedAt: {
           type: "string",
-          description: "ISO-8601 with offset, local 'YYYY-MM-DD HH:mm' in BX timezone, or 'YYYY-MM-DD' (defaults to now)"
+          description: "Event time. " + BX_EVENT_TIME_FORMATS + " Omitting it uses the device's current time."
         },
         requestId: { type: "string" },
         client: { type: "string" }
@@ -1268,7 +1327,7 @@ const RAW_TOOL_DEFINITIONS: McpToolDefinition[] = [
         stoolType: { type: "integer", minimum: 1, maximum: 7 },
         bristol: { type: "integer", minimum: 1, maximum: 7 },
         note: { type: "string" },
-        recordedAt: { type: "string", description: "ISO-8601 with offset, local 'YYYY-MM-DD HH:mm' in BX timezone, or 'YYYY-MM-DD'" },
+        recordedAt: { type: "string", description: "New event time. " + BX_EVENT_TIME_FORMATS + " Omit to keep the existing time." },
         requestId: { type: "string" },
         client: { type: "string" }
       }

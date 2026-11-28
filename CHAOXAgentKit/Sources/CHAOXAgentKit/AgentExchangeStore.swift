@@ -25,6 +25,8 @@ public actor AgentExchangeStore {
     private var isBusy = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
 
+    private static let maxCachedReceipts = 50
+
     private static let defaultNoCacheSession: URLSession = {
         let config = URLSessionConfiguration.ephemeral
         config.urlCache = nil
@@ -319,7 +321,7 @@ public actor AgentExchangeStore {
         self.clearRemoteConfiguration()
     }
 
-    public func loadStatus(receiptLimit: Int = 10) async -> AgentExchangeStatus {
+    public func loadStatus(receiptLimit: Int = 50) async -> AgentExchangeStatus {
         await self.loadRemoteStatus(receiptLimit: receiptLimit)
     }
 
@@ -484,7 +486,7 @@ public actor AgentExchangeStore {
         else {
             return []
         }
-        return Array(decoded.prefix(10))
+        return Array(decoded.prefix(Self.maxCachedReceipts))
     }
 
     private func persistCachedStatus(
@@ -493,7 +495,7 @@ public actor AgentExchangeStore {
         to store: UserDefaults
     ) {
         store.set(max(0, pendingInboxCount), forKey: self.pendingInboxCountKey)
-        let capped = Array(recentReceipts.prefix(10))
+        let capped = Array(recentReceipts.prefix(Self.maxCachedReceipts))
         if let encoded = try? AgentJSONCoding.compactEncoder.encode(capped) {
             store.set(encoded, forKey: self.recentReceiptsKey)
         }
@@ -505,13 +507,13 @@ public actor AgentExchangeStore {
     ) -> [AgentReceipt] {
         var seenRequestIds = Set<String>()
         var merged: [AgentReceipt] = []
-        merged.reserveCapacity(min(10, incomingChronological.count + existing.count))
+        merged.reserveCapacity(min(Self.maxCachedReceipts, incomingChronological.count + existing.count))
 
         for receipt in incomingChronological.reversed() + existing
             where seenRequestIds.insert(receipt.requestId).inserted
         {
             merged.append(receipt)
-            if merged.count == 10 {
+            if merged.count == Self.maxCachedReceipts {
                 break
             }
         }

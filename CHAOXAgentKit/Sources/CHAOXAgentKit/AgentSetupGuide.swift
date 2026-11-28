@@ -5,8 +5,45 @@ public enum AgentSetupGuide {
 
     public static func prompt(for app: AgentAppID, locale: Locale = .current) -> String {
         let language = Self.preferredResourceLanguage(for: locale)
-        let template = Self.loadTemplate(language: language)
+        let template = Self.loadTemplate(
+            named: "SetupGuide",
+            language: language,
+            fallback: "Deploy \(Self.repositoryURL) and share the URL and Bearer token."
+        )
         return template.replacingOccurrences(of: "{APP_NAME}", with: Self.displayName(for: app))
+    }
+
+    public static func agentConfigGuide(
+        for app: AgentAppID,
+        urlString: String,
+        token: String?,
+        tokenMode: AgentTokenMode = .legacy,
+        mcpToken: String? = nil,
+        locale: Locale = .current
+    ) -> String? {
+        guard let snippet = AgentEndpointParser.mcpConfigSnippet(
+            for: urlString,
+            token: token,
+            tokenMode: tokenMode,
+            mcpToken: mcpToken
+        ) else {
+            return nil
+        }
+        let language = Self.preferredResourceLanguage(for: locale)
+        let template = Self.loadTemplate(
+            named: "AgentConfigGuide",
+            language: language,
+            fallback: """
+            Copy this guide and send it to any AI assistant to configure {APP_NAME}:
+
+            ```json
+            {MCP_CONFIG_JSON}
+            ```
+            """
+        )
+        return template
+            .replacingOccurrences(of: "{APP_NAME}", with: Self.displayName(for: app))
+            .replacingOccurrences(of: "{MCP_CONFIG_JSON}", with: snippet)
     }
 
     private static func displayName(for app: AgentAppID) -> String {
@@ -28,17 +65,17 @@ public enum AgentSetupGuide {
         return code.hasPrefix("zh") ? "zh-Hans" : "en"
     }
 
-    private static func loadTemplate(language: String) -> String {
-        if let url = Bundle.module.url(forResource: "SetupGuide-\(language)", withExtension: "txt"),
+    private static func loadTemplate(named baseName: String, language: String, fallback: String) -> String {
+        if let url = Bundle.module.url(forResource: "\(baseName)-\(language)", withExtension: "txt"),
            let text = try? String(contentsOf: url, encoding: .utf8)
         {
             return text.trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        if let fallbackURL = Bundle.module.url(forResource: "SetupGuide-en", withExtension: "txt"),
+        if let fallbackURL = Bundle.module.url(forResource: "\(baseName)-en", withExtension: "txt"),
            let fallbackText = try? String(contentsOf: fallbackURL, encoding: .utf8)
         {
             return fallbackText.trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        return "Deploy \(Self.repositoryURL) and share the URL and Bearer token."
+        return fallback
     }
 }

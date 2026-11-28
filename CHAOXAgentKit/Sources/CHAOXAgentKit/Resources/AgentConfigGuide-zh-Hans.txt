@@ -1,0 +1,15 @@
+本指南可直接复制并发送给任意 AI 助手（如 Claude、ChatGPT、Cursor、Codex、OpenClaw 等），由其帮你自动完成配置。
+
+请帮我配置 CHAOX Agent（`chaox-agent/v1`）MCP 服务，用于连接我的 **{APP_NAME}**（同一个服务端也可同时连接 SX、BX 与 CSTEIX）：
+
+### 1. 添加 MCP 服务配置
+请将以下 Streamable HTTP MCP 服务添加到当前 AI 客户端的 MCP 配置中（若客户端使用图形界面配置，请填入相同的服务端地址与 Authorization 请求头）：
+
+```json
+{MCP_CONFIG_JSON}
+```
+
+### 2. 验证连接与使用说明
+- 保存配置并重连 MCP 后，调用 `chaox_get_status`（或列出可用工具）确认连接正常。
+- 开始使用前，请读取 MCP 资源 `chaox://guide/skill`（或参考 https://github.com/gh-csteix/chaox-agent/blob/main/mcp/SKILL.md ）以遵循各 App 的读写规则。
+- 数据的读写权限与开放范围由手机 App 中的「数据权限」实时控制；请妥善保管该令牌，勿泄露给无关方。

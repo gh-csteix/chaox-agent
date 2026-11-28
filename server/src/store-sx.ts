@@ -55,6 +55,233 @@ const VALID_PRICE_TYPES = new Set(["fixed", "floating"]);
 const VALID_PROJECT_TYPES = new Set(["nonRenewal", "autoRenew", "pausedRenew", "expired"]);
 const VALID_CASH_FLOW_PRESETS = new Set(["expenseOnly", "incomeOnly", "both"]);
 
+type SloganLanguage = "zh" | "en";
+type SloganRuleType = "default" | "time_of_day" | "solar_term" | "date_specific" | "holiday";
+
+const VALID_SLOGAN_RULE_TYPES = new Set<SloganRuleType>([
+  "default",
+  "time_of_day",
+  "solar_term",
+  "date_specific",
+  "holiday"
+]);
+
+function tryNormalizeSloganLanguage(raw: string): SloganLanguage | null {
+  const trimmed = raw.trim().toLowerCase().replace(/_/g, "-");
+  if (!trimmed) return null;
+  if (
+    trimmed === "zh" ||
+    trimmed === "zh-hans" ||
+    trimmed === "zh-cn" ||
+    /^zh-hans-[a-z0-9]+$/.test(trimmed)
+  ) {
+    return "zh";
+  }
+  if (trimmed === "en" || /^en-[a-z0-9]+(?:-[a-z0-9]+)*$/.test(trimmed)) {
+    return "en";
+  }
+  return null;
+}
+
+function normalizeSloganLanguage(raw: string): SloganLanguage {
+  const normalized = tryNormalizeSloganLanguage(raw);
+  if (normalized) return normalized;
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    throw new Error("Slogan 'language' cannot be empty. Supported values: 'zh' or 'en'.");
+  }
+  throw new Error(
+    `Unsupported slogan language '${trimmed}'. Supported values: 'zh' (or 'zh-Hans'/'zh-CN') and 'en'.`
+  );
+}
+
+function canonicalSloganLanguageForDisplay(raw: string): string {
+  return tryNormalizeSloganLanguage(raw) ?? raw.trim().toLowerCase();
+}
+
+function defaultSloganPriority(ruleType: SloganRuleType): number {
+  switch (ruleType) {
+    case "holiday":
+    case "date_specific":
+      return 1;
+    case "solar_term":
+      return 3;
+    case "time_of_day":
+      return 5;
+    case "default":
+      return 10;
+  }
+}
+
+function daysInCalendarMonth(month: number, year: number | null): number {
+  const effectiveYear = year ?? 2024;
+  return new Date(Date.UTC(effectiveYear, month, 0)).getUTCDate();
+}
+
+function normalizeSloganRuleType(rawRuleType?: string): SloganRuleType {
+  if (rawRuleType === undefined) return "default";
+  const trimmed = rawRuleType.trim().toLowerCase();
+  if (!trimmed) {
+    throw new Error(
+      "Slogan 'ruleType' cannot be empty. Valid values: default, time_of_day, solar_term, date_specific, holiday."
+    );
+  }
+  const mapped = trimmed === "always" ? "default" : trimmed;
+  if (!VALID_SLOGAN_RULE_TYPES.has(mapped as SloganRuleType)) {
+    throw new Error(
+      `Invalid slogan ruleType '${rawRuleType.trim()}'. Valid values: default, time_of_day, solar_term, date_specific, holiday.`
+    );
+  }
+  return mapped as SloganRuleType;
+}
+
+function normalizeSloganRuleTypeLenient(rawRuleType: string): string {
+  const trimmed = rawRuleType.trim().toLowerCase();
+  if (!trimmed || trimmed === "always") return "default";
+  return trimmed;
+}
+
+function parsePlainJsonObject(raw: string, errorMessage: string): Record<string, unknown> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(errorMessage);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(errorMessage);
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function requireIntInRange(value: unknown, fieldName: string, min: number, max: number, context: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) {
+    throw new Error(`${context} Field '${fieldName}' must be an integer between ${min} and ${max}.`);
+  }
+  return value;
+}
+
+function normalizeSloganRule(
+  rawRuleType?: string,
+  rawRuleValue?: string
+): { ruleType: SloganRuleType; ruleValue: string } {
+  const ruleType = normalizeSloganRuleType(rawRuleType);
+  const trimmedValue = rawRuleValue?.trim() ?? "";
+
+  if (ruleType === "default") {
+    if (!trimmedValue) {
+      return { ruleType, ruleValue: "{}" };
+    }
+    const obj = parsePlainJsonObject(
+      trimmedValue,
+      "Slogan ruleType 'default' expects ruleValue '{}' (or omitted)."
+    );
+    if (Object.keys(obj).length > 0) {
+      throw new Error("Slogan ruleType 'default' expects empty JSON object '{}' (or omitted).");
+    }
+    return { ruleType, ruleValue: "{}" };
+  }
+
+  if (ruleType === "time_of_day") {
+    const example =
+      "Slogan ruleType 'time_of_day' requires JSON ruleValue like '{\"start\":6,\"end\":11}' with integer 'start' and 'end' in 0..23 and start != end.";
+    if (!trimmedValue) throw new Error(example);
+    const obj = parsePlainJsonObject(trimmedValue, example);
+    const start = requireIntInRange(obj.start, "start", 0, 23, example);
+    const end = requireIntInRange(obj.end, "end", 0, 23, example);
+    if (start === end) {
+      throw new Error(`${example} Received start=${start} and end=${end}.`);
+    }
+    return { ruleType, ruleValue: JSON.stringify({ start, end }) };
+  }
+
+  if (ruleType === "solar_term") {
+    const example =
+      "Slogan ruleType 'solar_term' requires JSON ruleValue like '{\"term\":\"立春\"}' with a non-empty string 'term'.";
+    if (!trimmedValue) throw new Error(example);
+    const obj = parsePlainJsonObject(trimmedValue, example);
+    if (typeof obj.term !== "string" || !obj.term.trim()) {
+      throw new Error(example);
+    }
+    return { ruleType, ruleValue: JSON.stringify({ term: obj.term.trim() }) };
+  }
+
+  if (ruleType === "date_specific") {
+    const example =
+      "Slogan ruleType 'date_specific' requires JSON ruleValue like '{\"month\":1,\"day\":1}' (optional 'endMonth'/'endDay') or 'MM-DD' shorthand.";
+    if (!trimmedValue) throw new Error(example);
+    const shorthand = /^(\d{1,2})-(\d{1,2})$/.exec(trimmedValue);
+    if (shorthand) {
+      const month = requireIntInRange(Number(shorthand[1]), "month", 1, 12, example);
+      const maxDay = daysInCalendarMonth(month, null);
+      const day = requireIntInRange(Number(shorthand[2]), "day", 1, maxDay, example);
+      return { ruleType, ruleValue: JSON.stringify({ month, day }) };
+    }
+    const obj = parsePlainJsonObject(trimmedValue, example);
+    const month = requireIntInRange(obj.month, "month", 1, 12, example);
+    const maxDay = daysInCalendarMonth(month, null);
+    const day = requireIntInRange(obj.day, "day", 1, maxDay, example);
+    const hasEndMonth = obj.endMonth !== undefined && obj.endMonth !== null;
+    const hasEndDay = obj.endDay !== undefined && obj.endDay !== null;
+    if (hasEndMonth || hasEndDay) {
+      if (!hasEndMonth || !hasEndDay) {
+        throw new Error(`${example} Provide both 'endMonth' and 'endDay' together when specifying a date range.`);
+      }
+      const endMonth = requireIntInRange(obj.endMonth, "endMonth", 1, 12, example);
+      const maxEndDay = daysInCalendarMonth(endMonth, null);
+      const endDay = requireIntInRange(obj.endDay, "endDay", 1, maxEndDay, example);
+      return { ruleType, ruleValue: JSON.stringify({ month, day, endMonth, endDay }) };
+    }
+    return { ruleType, ruleValue: JSON.stringify({ month, day }) };
+  }
+
+  const example =
+    "Slogan ruleType 'holiday' requires JSON ruleValue like '{\"year\":2026,\"month\":2,\"day\":17}' (optional 'endMonth'/'endDay') or 'YYYY-MM-DD' shorthand.";
+  if (!trimmedValue) throw new Error(example);
+  const shorthand = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(trimmedValue);
+  if (shorthand) {
+    const year = requireIntInRange(Number(shorthand[1]), "year", 1900, 9999, example);
+    const month = requireIntInRange(Number(shorthand[2]), "month", 1, 12, example);
+    const maxDay = daysInCalendarMonth(month, year);
+    const day = requireIntInRange(Number(shorthand[3]), "day", 1, maxDay, example);
+    return { ruleType, ruleValue: JSON.stringify({ year, month, day }) };
+  }
+  const obj = parsePlainJsonObject(trimmedValue, example);
+  const year = requireIntInRange(obj.year, "year", 1900, 9999, example);
+  const month = requireIntInRange(obj.month, "month", 1, 12, example);
+  const maxDay = daysInCalendarMonth(month, year);
+  const day = requireIntInRange(obj.day, "day", 1, maxDay, example);
+  const hasEndMonth = obj.endMonth !== undefined && obj.endMonth !== null;
+  const hasEndDay = obj.endDay !== undefined && obj.endDay !== null;
+  if (hasEndMonth || hasEndDay) {
+    if (!hasEndMonth || !hasEndDay) {
+      throw new Error(`${example} Provide both 'endMonth' and 'endDay' together when specifying a date range.`);
+    }
+    const endMonth = requireIntInRange(obj.endMonth, "endMonth", 1, 12, example);
+    const wrapsYear = endMonth < month || (endMonth === month && Number(obj.endDay) < day);
+    const maxEndDay = daysInCalendarMonth(endMonth, wrapsYear ? year + 1 : year);
+    const endDay = requireIntInRange(obj.endDay, "endDay", 1, maxEndDay, example);
+    return { ruleType, ruleValue: JSON.stringify({ year, month, day, endMonth, endDay }) };
+  }
+  return { ruleType, ruleValue: JSON.stringify({ year, month, day }) };
+}
+
+function normalizeStandaloneSloganRuleValue(rawRuleValue: string): string {
+  const trimmed = rawRuleValue.trim();
+  if (!trimmed) return "{}";
+  if (/^(\d{1,2})-(\d{1,2})$/.test(trimmed)) {
+    return normalizeSloganRule("date_specific", trimmed).ruleValue;
+  }
+  if (/^(\d{4})-(\d{1,2})-(\d{1,2})$/.test(trimmed)) {
+    return normalizeSloganRule("holiday", trimmed).ruleValue;
+  }
+  const obj = parsePlainJsonObject(
+    trimmed,
+    "Invalid slogan 'ruleValue'. Expected a JSON object matching the slogan's ruleType (or 'MM-DD' / 'YYYY-MM-DD' shorthand). Pass 'ruleType' together with 'ruleValue' for full validation."
+  );
+  return JSON.stringify(obj);
+}
+
 function catalogTimeZone(catalog: SxCatalog | null, fallbackTz?: string): string | undefined {
   return catalog?.timeZoneIdentifier?.trim() || fallbackTz?.trim() || undefined;
 }
@@ -777,41 +1004,177 @@ export class SxOperations {
     const items: SxSloganRecord[] = dataset ? dataset.map((s) => ({ ...s })) : [];
     const byId = new Map(items.map((s) => [s.id, s]));
 
+    const siblingsForPair = (pairId: string | null | undefined): SxSloganRecord[] => {
+      const key = pairId?.trim();
+      if (!key) return [];
+      return items.filter((row) => row.pairId?.trim() === key);
+    };
+
     for (const env of pending) {
       if (env.op === "create_slogan") {
-        items.unshift({
+        const language =
+          typeof env.payload.language === "string"
+            ? canonicalSloganLanguageForDisplay(env.payload.language)
+            : "zh";
+        const ruleType =
+          typeof env.payload.ruleType === "string"
+            ? normalizeSloganRuleTypeLenient(env.payload.ruleType)
+            : "default";
+        const ruleValue =
+          typeof env.payload.ruleValue === "string" && env.payload.ruleValue.trim()
+            ? env.payload.ruleValue.trim()
+            : ruleType === "default"
+              ? "{}"
+              : "";
+        const priority =
+          typeof env.payload.priority === "number"
+            ? env.payload.priority
+            : VALID_SLOGAN_RULE_TYPES.has(ruleType as SloganRuleType)
+              ? defaultSloganPriority(ruleType as SloganRuleType)
+              : 10;
+        const emoji =
+          typeof env.payload.emoji === "string" && env.payload.emoji.trim() ? env.payload.emoji.trim() : null;
+        const isEnabled = env.payload.isEnabled !== false;
+        const textEn =
+          typeof env.payload.textEn === "string" && env.payload.textEn.trim() ? env.payload.textEn.trim() : null;
+        const rawPairId =
+          typeof env.payload.pairId === "string" && env.payload.pairId.trim()
+            ? env.payload.pairId.trim()
+            : typeof env.payload.pairID === "string" && env.payload.pairID.trim()
+              ? env.payload.pairID.trim()
+              : null;
+        const pairId = rawPairId ?? (textEn && language === "zh" ? `pending:${env.requestId}` : null);
+
+        const primaryRow: SxSloganRecord = {
           id: -1,
-          language: String(env.payload.language ?? "zh-Hans"),
+          language,
           text: String(env.payload.text ?? ""),
-          emoji: typeof env.payload.emoji === "string" ? env.payload.emoji : null,
-          ruleType: String(env.payload.ruleType ?? "always"),
-          ruleValue: String(env.payload.ruleValue ?? ""),
-          priority: Number(env.payload.priority ?? 0),
-          isEnabled: env.payload.isEnabled !== false,
+          emoji,
+          ruleType,
+          ruleValue,
+          priority,
+          isEnabled,
+          pairId,
           pendingStatus: "queued_create"
-        });
+        };
+        if (textEn && language === "zh") {
+          const enRow: SxSloganRecord = {
+            id: -1,
+            language: "en",
+            text: textEn,
+            emoji,
+            ruleType,
+            ruleValue,
+            priority,
+            isEnabled,
+            pairId,
+            pendingStatus: "queued_create"
+          };
+          items.unshift(primaryRow, enRow);
+        } else {
+          items.unshift(primaryRow);
+        }
       } else if (env.op === "update_slogan") {
         const target = byId.get(Number(env.payload.id));
         if (target) {
+          const existingPairId = target.pairId?.trim() || null;
+          const pairRows = existingPairId ? siblingsForPair(existingPairId) : [target];
+
           if (typeof env.payload.text === "string") target.text = env.payload.text;
-          if (typeof env.payload.language === "string") target.language = env.payload.language;
-          if (typeof env.payload.emoji === "string") target.emoji = env.payload.emoji || null;
-          if (typeof env.payload.ruleType === "string") target.ruleType = env.payload.ruleType;
-          if (typeof env.payload.ruleValue === "string") target.ruleValue = env.payload.ruleValue;
-          if (typeof env.payload.priority === "number") target.priority = env.payload.priority;
-          if (typeof env.payload.isEnabled === "boolean") target.isEnabled = env.payload.isEnabled;
-          target.pendingStatus = "queued_update";
+          if (typeof env.payload.language === "string") {
+            target.language = canonicalSloganLanguageForDisplay(env.payload.language);
+          }
+
+          const hasEmoji = env.payload.emoji === null || typeof env.payload.emoji === "string";
+          const nextEmoji =
+            env.payload.emoji === null
+              ? null
+              : typeof env.payload.emoji === "string"
+                ? env.payload.emoji.trim() || null
+                : undefined;
+          const nextRuleType =
+            typeof env.payload.ruleType === "string"
+              ? normalizeSloganRuleTypeLenient(env.payload.ruleType)
+              : undefined;
+          const nextRuleValue =
+            typeof env.payload.ruleValue === "string" ? env.payload.ruleValue : undefined;
+          const nextPriority =
+            typeof env.payload.priority === "number" ? env.payload.priority : undefined;
+          const nextIsEnabled =
+            typeof env.payload.isEnabled === "boolean" ? env.payload.isEnabled : undefined;
+
+          const hasSharedUpdate =
+            hasEmoji ||
+            nextRuleType !== undefined ||
+            nextRuleValue !== undefined ||
+            nextPriority !== undefined ||
+            nextIsEnabled !== undefined;
+
+          for (const row of pairRows) {
+            if (hasEmoji) row.emoji = nextEmoji ?? null;
+            if (nextRuleType !== undefined) row.ruleType = nextRuleType;
+            if (nextRuleValue !== undefined) row.ruleValue = nextRuleValue;
+            if (nextPriority !== undefined) row.priority = nextPriority;
+            if (nextIsEnabled !== undefined) row.isEnabled = nextIsEnabled;
+            if (row === target || hasSharedUpdate) {
+              row.pendingStatus = "queued_update";
+            }
+          }
+
+          const applyLanguageCopy = (lang: SloganLanguage, copy: string) => {
+            const matching = pairRows.find((row) => canonicalSloganLanguageForDisplay(row.language) === lang);
+            if (matching) {
+              matching.text = copy;
+              matching.pendingStatus = "queued_update";
+              return;
+            }
+            const effectivePairId = target.pairId?.trim() || `pending-pair:${env.requestId}`;
+            if (!target.pairId?.trim()) {
+              target.pairId = effectivePairId;
+            }
+            const counterpart: SxSloganRecord = {
+              id: -1,
+              language: lang,
+              text: copy,
+              emoji: target.emoji ?? null,
+              ruleType: target.ruleType,
+              ruleValue: target.ruleValue,
+              priority: target.priority,
+              isEnabled: target.isEnabled,
+              pairId: effectivePairId,
+              pendingStatus: "queued_create"
+            };
+            items.push(counterpart);
+            pairRows.push(counterpart);
+          };
+
+          if (typeof env.payload.textZh === "string" && env.payload.textZh.trim()) {
+            applyLanguageCopy("zh", env.payload.textZh.trim());
+          }
+          if (typeof env.payload.textEn === "string" && env.payload.textEn.trim()) {
+            applyLanguageCopy("en", env.payload.textEn.trim());
+          }
         }
       } else if (env.op === "delete_slogan") {
-        const target = byId.get(Number(env.payload.id));
-        if (target) target.pendingStatus = "queued_delete";
+        const targetId = Number(env.payload.id);
+        const target = byId.get(targetId);
+        if (target) {
+          const targetPairId = target.pairId?.trim() || null;
+          for (let i = items.length - 1; i >= 0; i -= 1) {
+            const row = items[i];
+            if (row.id === targetId || (targetPairId && row.pairId?.trim() === targetPairId)) {
+              if (row.id > 0) byId.delete(row.id);
+              items.splice(i, 1);
+            }
+          }
+        }
       }
     }
 
     let filtered = items;
     if (options.language?.trim()) {
-      const lang = options.language.trim().toLowerCase();
-      filtered = filtered.filter((s) => s.language.toLowerCase() === lang);
+      const lang = normalizeSloganLanguage(options.language);
+      filtered = filtered.filter((s) => canonicalSloganLanguageForDisplay(s.language) === lang);
     }
     if (options.enabledOnly) {
       filtered = filtered.filter((s) => s.isEnabled);
@@ -1929,27 +2292,99 @@ export class SxOperations {
 
   // MARK: - Slogans CRUD
 
+  private async findSloganForUpdate(id: number): Promise<SxSloganRecord | null> {
+    const [dataset, pending] = await Promise.all([
+      this.ctx.readDataset<SxSloganRecord>("sx", "slogans"),
+      this.ctx.listPendingEnvelopes("sx")
+    ]);
+    const items: SxSloganRecord[] = dataset ? dataset.map((s) => ({ ...s })) : [];
+    const byId = new Map(items.map((s) => [s.id, s]));
+    for (const env of pending) {
+      if (env.op === "update_slogan") {
+        const target = byId.get(Number(env.payload.id));
+        if (target) {
+          const targetPairId = target.pairId?.trim() || null;
+          const group = targetPairId
+            ? items.filter((row) => row.pairId?.trim() === targetPairId)
+            : [target];
+          for (const row of group) {
+            if (typeof env.payload.ruleType === "string") row.ruleType = env.payload.ruleType;
+            if (typeof env.payload.ruleValue === "string") row.ruleValue = env.payload.ruleValue;
+          }
+        }
+      } else if (env.op === "delete_slogan") {
+        const deletedId = Number(env.payload.id);
+        const deleted = byId.get(deletedId);
+        if (deleted) {
+          const deletedPairId = deleted.pairId?.trim() || null;
+          for (let i = items.length - 1; i >= 0; i -= 1) {
+            const row = items[i];
+            if (row.id === deletedId || (deletedPairId && row.pairId?.trim() === deletedPairId)) {
+              if (row.id > 0) byId.delete(row.id);
+              items.splice(i, 1);
+            }
+          }
+        }
+      }
+    }
+    return byId.get(id) ?? null;
+  }
+
   async createSlogan(input: {
     text: string;
+    textEn?: string;
     language?: string;
     emoji?: string;
     ruleType?: string;
     ruleValue?: string;
     priority?: number;
     isEnabled?: boolean;
+    pairId?: string;
     requestId?: string;
     client?: string;
   }): Promise<Record<string, unknown>> {
     await this.ctx.assertActionAllowed("sx", "create", "slogans");
     const text = requireNonEmptyString(input.text, "text");
+    const language = input.language !== undefined ? normalizeSloganLanguage(input.language) : "zh";
+    const { ruleType, ruleValue } = normalizeSloganRule(input.ruleType, input.ruleValue);
+
+    let priority: number;
+    if (input.priority !== undefined) {
+      if (!Number.isInteger(input.priority)) {
+        throw new Error("Slogan 'priority' must be an integer.");
+      }
+      priority = input.priority;
+    } else {
+      priority = defaultSloganPriority(ruleType);
+    }
+
+    let textEn: string | undefined;
+    if (input.textEn !== undefined) {
+      textEn = requireNonEmptyString(input.textEn, "textEn");
+      if (language !== "zh") {
+        throw new Error(
+          "'textEn' is only supported when 'language' is 'zh' (for creating a linked zh+en pair). When creating an English-only slogan, pass the text in 'text' with language='en'."
+        );
+      }
+    }
+
+    let pairId: string | undefined;
+    if (input.pairId !== undefined) {
+      pairId = requireNonEmptyString(input.pairId, "pairId");
+    } else if (textEn !== undefined) {
+      pairId = crypto.randomUUID();
+    }
+
     const payload: Record<string, unknown> = {
       text,
-      language: input.language?.trim() || "zh-Hans",
-      ruleType: input.ruleType?.trim() || "always",
-      ruleValue: input.ruleValue?.trim() ?? "",
-      priority: Number.isInteger(input.priority) ? input.priority : 0,
+      language,
+      ruleType,
+      ruleValue,
+      priority,
       isEnabled: input.isEnabled ?? true
     };
+    if (textEn !== undefined) payload.textEn = textEn;
+    if (pairId !== undefined) payload.pairId = pairId;
     if (input.emoji?.trim()) payload.emoji = input.emoji.trim();
     const requestId = input.requestId?.trim() || generateRequestId("sx-slo");
     return this.ctx.enqueueInbox("sx", "create_slogan", requestId, input.client, payload);
@@ -1958,6 +2393,8 @@ export class SxOperations {
   async updateSlogan(input: {
     id: number;
     text?: string;
+    textZh?: string;
+    textEn?: string;
     language?: string;
     emoji?: string | null;
     ruleType?: string;
@@ -1971,10 +2408,42 @@ export class SxOperations {
     const id = validateId(input.id, "id");
     const payload: Record<string, unknown> = { id };
     if (input.text !== undefined) payload.text = requireNonEmptyString(input.text, "text");
-    if (input.language !== undefined) payload.language = requireNonEmptyString(input.language, "language");
+    if (input.textZh !== undefined) payload.textZh = requireNonEmptyString(input.textZh, "textZh");
+    if (input.textEn !== undefined) payload.textEn = requireNonEmptyString(input.textEn, "textEn");
+    if (input.language !== undefined) payload.language = normalizeSloganLanguage(input.language);
     if (input.emoji !== undefined) payload.emoji = input.emoji === null ? "" : input.emoji.trim();
-    if (input.ruleType !== undefined) payload.ruleType = requireNonEmptyString(input.ruleType, "ruleType");
-    if (input.ruleValue !== undefined) payload.ruleValue = input.ruleValue.trim();
+
+    if (input.ruleType !== undefined && input.ruleValue !== undefined) {
+      const normalized = normalizeSloganRule(input.ruleType, input.ruleValue);
+      payload.ruleType = normalized.ruleType;
+      payload.ruleValue = normalized.ruleValue;
+    } else if (input.ruleType !== undefined) {
+      const normalizedType = normalizeSloganRuleType(input.ruleType);
+      if (normalizedType === "default") {
+        payload.ruleType = "default";
+        payload.ruleValue = "{}";
+      } else {
+        const existing = await this.findSloganForUpdate(id);
+        if (existing && normalizeSloganRuleTypeLenient(existing.ruleType) === normalizedType) {
+          const normalized = normalizeSloganRule(normalizedType, existing.ruleValue);
+          payload.ruleType = normalized.ruleType;
+          payload.ruleValue = normalized.ruleValue;
+        } else {
+          // Throws an actionable error describing the required ruleValue format for normalizedType.
+          normalizeSloganRule(normalizedType, undefined);
+        }
+      }
+    } else if (input.ruleValue !== undefined) {
+      const existing = await this.findSloganForUpdate(id);
+      if (existing) {
+        const existingType = normalizeSloganRuleType(existing.ruleType);
+        const normalized = normalizeSloganRule(existingType, input.ruleValue);
+        payload.ruleValue = normalized.ruleValue;
+      } else {
+        payload.ruleValue = normalizeStandaloneSloganRuleValue(input.ruleValue);
+      }
+    }
+
     if (input.priority !== undefined) {
       if (!Number.isInteger(input.priority)) throw new Error("Slogan 'priority' must be an integer.");
       payload.priority = input.priority;

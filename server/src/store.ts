@@ -614,10 +614,17 @@ export class ExchangeStore {
     if (policy && !policy.allowedDomains.includes("tags")) {
       filtered.tags = [];
     }
+    if (Array.isArray(catalog.rules)) {
+      filtered.rules = catalog.rules.map((rule) =>
+        typeof rule === "string"
+          ? rule.replace("00 means midnight or hour unknown", "use 00 only for a known payment in the midnight hour")
+          : rule
+      );
+    }
     filtered.fieldGuide = {
       timeZone: filtered.timeZoneIdentifier ?? "UTC",
       expenseDisplayDateFormat:
-        "YYYY-MM-DD-HH — the trailing 2 digits (HH) are the 24-hour local hour (00-23) in timeZoneIdentifier, NOT minutes and NOT a sequence number. Examples: 2026-11-22-09 = 09:00 local, 2026-11-22-12 = 12:00 noon, 2026-11-21-00 = midnight or hour unknown.",
+        "YYYY-MM-DD-HH displays the 24-hour local payment hour (00-23) in timeZoneIdentifier. A historical -00 can also come from a date-only write.",
       incomeDisplayDateFormat:
         "YYYY-MM-DD (local calendar date; SX UI shows day precision without -HH).",
       expenseWriteFields: {
@@ -626,8 +633,8 @@ export class ExchangeStore {
           "Required string: existing SX project/category name from catalog.projects with supportsExpense: true (never invent one-off merchants/items as projects; put those in note).",
         currency: "Optional 3-letter ISO-4217 code (e.g. CNY, USD); omit to inherit the project's default currency.",
         date:
-          "Optional timestamp: accepts ISO-8601 with offset ('2026-11-22T12:00:00+08:00' or '...Z'), SX format ('2026-11-22-12'), local ('2026-11-22 12:00'), or 'YYYY-MM-DD' (defaults to 00:00 local = YYYY-MM-DD-00 unless hour is passed). Omit both date and hour for current time.",
-        hour: "Optional integer 0..23: 24-hour local hour in timeZoneIdentifier; sets/overrides HH in YYYY-MM-DD-HH (uses today if date omitted).",
+          "Payment time as ISO-8601 with offset, SX format ('2026-11-22-12'), local date and time, or a calendar date plus a known hour. A bare date becomes local midnight. Omitting date and hour on create uses the device's current time.",
+        hour: "Known 24-hour payment hour (0..23) in timeZoneIdentifier. Use 0 for the midnight hour. On create without a date, applies to today.",
         tags: "Optional string[]: OMIT to inherit the project's recentExpenseTags; pass [] to clear all tags; pass array to set exact tags (missing tags auto-create on device).",
         note: "Optional string (singular 'note' on write): merchant, dish, item, or order memo shown as one line on cards; put key details first.",
         credentialId:
@@ -661,7 +668,7 @@ export class ExchangeStore {
         "projectName is an existing category/service bucket; put specific restaurant, dish, vendor, or item details in note.",
         "Omitting tags on create inherits the project's latest tags; passing [] explicitly clears tags.",
         "Write tools use 'note' (singular) for expense/income/refund memos, while list responses return 'notes' (plural).",
-        "Passing bare YYYY-MM-DD without 'hour' records local 00:00 (displayed as YYYY-MM-DD-00).",
+        "Ask for the payment time or defer the write when the hour is unknown. A bare date records local midnight.",
         "sx_update_expense applies partial patches in FIFO order on device: omitted fields stay unchanged, and queued creates (id: -1) can be edited/cancelled directly via pendingRequestId.",
         "Credential binding rule (when 'credentials' scope is enabled): 1 linked credential -> server auto-binds; multiple -> server returns queued=false with credentialSelectionRequired=true and credentialCandidates so you MUST ask the user to choose (or pass skipCredential=true); 0 -> leaves blank and NEVER auto-creates a credential. Responses always include credentialId (or null)."
       ]

@@ -820,7 +820,7 @@ struct RemoteExchangeStoreTests {
         #expect(await store.savedRemoteToken() == nil)
     }
 
-    @Test("Persists cached pending count and up to 10 receipts and updates on inbox sync")
+    @Test("Persists cached pending count and up to 50 receipts and updates on inbox sync")
     func cachesReceiptsAndPendingCount() async throws {
         let suiteName = "CachedReceiptsTests.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suiteName))
@@ -831,17 +831,19 @@ struct RemoteExchangeStoreTests {
             inMemoryTokenStorage: true
         )
 
-        let serverReceipts = Self.makeSampleReceipts(count: 12)
+        let serverReceipts = Self.makeSampleReceipts(count: 55)
 
         final class ServerState: @unchecked Sendable {
             var shouldFailStatus = false
             var envelopes: [AgentInboxEnvelope] = []
+            var observedStatusQueries: [String?] = []
         }
         let serverState = ServerState()
 
         StubURLProtocol.handler = { req, _ in
             let path = req.url?.path ?? ""
             if path == "/sync/sx/status" {
+                serverState.observedStatusQueries.append(req.url?.query)
                 if serverState.shouldFailStatus {
                     return (503, Data(#"{"error":"Worker unavailable"}"#.utf8))
                 }
@@ -871,29 +873,41 @@ struct RemoteExchangeStoreTests {
 
         try await store.saveRemoteConfiguration(urlString: "https://chaox.workers.dev", token: "tok-123")
 
-        // Loading status persists pendingInboxCount and caps cached receipts at 10.
-        let loaded = await store.loadStatus(receiptLimit: 12)
+        // Default loadStatus requests limit=50, persists pendingInboxCount, and caps cached receipts at 50.
+        let loaded = await store.loadStatus()
+        #expect(serverState.observedStatusQueries.last == "limit=50")
         #expect(loaded.pendingInboxCount == 3)
-        #expect(loaded.recentReceipts.count == 12)
+        #expect(loaded.recentReceipts.count == 55)
         #expect(loaded.attentionReceiptCount == 1)
         #expect(loaded.hasAttentionIssue)
 
+        // Explicit limits are clamped to 1...50.
+        _ = await store.loadStatus(receiptLimit: 99)
+        #expect(serverState.observedStatusQueries.last == "limit=50")
+        _ = await store.loadStatus(receiptLimit: 0)
+        #expect(serverState.observedStatusQueries.last == "limit=1")
+
         let cachedAfterLoad = await store.cachedStatus()
         #expect(cachedAfterLoad.pendingInboxCount == 3)
-        #expect(cachedAfterLoad.recentReceipts.count == 10)
-        #expect(cachedAfterLoad.recentReceipts.map(\.requestId) == (1 ... 10).map { "req-\($0)" })
+        #expect(cachedAfterLoad.recentReceipts.count == 50)
+        #expect(cachedAfterLoad.recentReceipts.map(\.requestId) == (1 ... 50).map { "req-\($0)" })
         #expect(cachedAfterLoad.attentionReceiptCount == 1)
         #expect(cachedAfterLoad.hasAttentionIssue)
+
+        // Even if raw defaults hold more than 50 receipts, cachedStatus caps reads at 50.
+        let oversizedCache = try AgentJSONCoding.compactEncoder.encode(serverReceipts)
+        defaults.set(oversizedCache, forKey: "chaox.agent.sx.recentReceipts")
+        #expect(await store.cachedStatus().recentReceipts.count == 50)
 
         // Offline/error status preserves cached pendingInboxCount and recentReceipts while surfacing lastError.
         serverState.shouldFailStatus = true
         let offlineStatus = await store.loadStatus()
         #expect(offlineStatus.lastError != nil)
         #expect(offlineStatus.pendingInboxCount == 3)
-        #expect(offlineStatus.recentReceipts.count == 10)
+        #expect(offlineStatus.recentReceipts.count == 50)
         #expect(offlineStatus.hasAttentionIssue)
 
-        // Processing inbox clears pendingInboxCount and prepends new receipts newest-first (capped at 10).
+        // Processing inbox clears pendingInboxCount and prepends new receipts newest-first (capped at 50).
         serverState.shouldFailStatus = false
         serverState.envelopes = [
             AgentInboxEnvelope(
@@ -920,9 +934,10 @@ struct RemoteExchangeStoreTests {
 
         let cachedAfterInbox = await store.cachedStatus()
         #expect(cachedAfterInbox.pendingInboxCount == 0)
-        #expect(cachedAfterInbox.recentReceipts.count == 10)
+        #expect(cachedAfterInbox.recentReceipts.count == 50)
         #expect(cachedAfterInbox.recentReceipts.first?.requestId == "new-2")
         #expect(cachedAfterInbox.recentReceipts.dropFirst().first?.requestId == "new-1")
+        #expect(cachedAfterInbox.recentReceipts.last?.requestId == "req-48")
         // First 6 are: new-2 (rejected), new-1 (applied), req-1 (applied), req-2 (failed), req-3, req-4
         #expect(cachedAfterInbox.attentionReceiptCount == 2)
         #expect(cachedAfterInbox.hasAttentionIssue)
@@ -935,7 +950,7 @@ struct RemoteExchangeStoreTests {
         }
         let cachedAfterEmptyInbox = await store.cachedStatus()
         #expect(cachedAfterEmptyInbox.pendingInboxCount == 0)
-        #expect(cachedAfterEmptyInbox.recentReceipts.count == 10)
+        #expect(cachedAfterEmptyInbox.recentReceipts.count == 50)
 
         // Clearing configuration wipes cached pending count and receipt keys.
         await store.clearRemoteConfiguration()
